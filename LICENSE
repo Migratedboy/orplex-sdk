@@ -1,21 +1,21 @@
-MIT License
+Copyright (c) 2026 orplex
+All Rights Reserved.
 
-Copyright (c) 2025 Orplex
+This license governs the use of the software project "orplex-sdk" and all associated source code, libraries, binaries, and documentation files (collectively, the "Software").
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+1. Grant of Limited Personal License
+Permission is hereby granted, free of charge, to any individual obtaining a copy of orplex-sdk to view, download, and run the Software strictly for personal, non-commercial, and educational use.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+2. Restrictions
+Without explicit, prior written permission from the Copyright Holder, you may NOT:
+- Use orplex-sdk, in whole or in part, for any commercial purpose, business operation, client work, or revenue-generating activity.
+- Modify, adapt, alter, translate, reverse-engineer, or create derivative works based on orplex-sdk.
+- Sell, resell, rent, lease, sublicense, distribute, or redistribute orplex-sdk or any copies of it to third parties.
+- Integrate orplex-sdk into any commercial product, paid service, or proprietary software package.
+- Remove or alter any copyright notices, branding, or this license text from the Software.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+3. GitHub Terms of Service Exception
+In accordance with GitHub's Terms of Service, users are permitted to view and fork the orplex-sdk repository on GitHub solely for personal reference and inspection, subject to all restrictions stated above.
+
+4. Disclaimer of Warranty
+ORPLEX-SDK IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH ORPLEX-SDK OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
