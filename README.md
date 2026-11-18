@@ -111,4 +111,4 @@ In progress:
 
 ## License
 
-MIT
+Custom License
