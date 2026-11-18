@@ -1,0 +1,90 @@
+{
+  "name": "@orplex/sdk",
+  "version": "0.1.0",
+  "description": "Orplex agent SDK — AI tools, MCP gateway, skills, plugins, cloud client and marketplace client. Framework-free core of Orplex Code.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "homepage": "https://github.com/Migratedboy/orplex-sdk",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Migratedboy/orplex-sdk.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Migratedboy/orplex-sdk/issues"
+  },
+  "keywords": [
+    "orplex",
+    "agent",
+    "ai-tools",
+    "mcp",
+    "model-context-protocol",
+    "skills",
+    "coding-agent"
+  ],
+  "files": [
+    "dist",
+    "!dist/**/*.map",
+    "README.md",
+    "LICENSE"
+  ],
+  "main": "./dist/cjs/index.js",
+  "types": "./dist/esm/index.d.ts",
+  "sideEffects": false,
+  "exports": {
+    "": {
+      "types": "./dist/esm/index.d.ts",
+      "import": "./dist/esm/index.js",
+      "require": "./dist/cjs/index.js"
+    },
+    "./tools": {
+      "types": "./dist/esm/tools.d.ts",
+      "import": "./dist/esm/tools.js",
+      "require": "./dist/cjs/tools.js"
+    },
+    "./mcp": {
+      "types": "./dist/esm/mcp.d.ts",
+      "import": "./dist/esm/mcp.js",
+      "require": "./dist/cjs/mcp.js"
+    },
+    "./skills": {
+      "types": "./dist/esm/skills.d.ts",
+      "import": "./dist/esm/skills.js",
+      "require": "./dist/cjs/skills.js"
+    },
+    "./plugins": {
+      "types": "./dist/esm/plugins.d.ts",
+      "import": "./dist/esm/plugins.js",
+      "require": "./dist/cjs/plugins.js"
+    },
+    "./cloud": {
+      "types": "./dist/esm/cloud.d.ts",
+      "import": "./dist/esm/cloud.js",
+      "require": "./dist/cjs/cloud.js"
+    },
+    "./marketplace": {
+      "types": "./dist/esm/marketplace.d.ts",
+      "import": "./dist/esm/marketplace.js",
+      "require": "./dist/cjs/marketplace.js"
+    },
+    "./agent": {
+      "types": "./dist/esm/agent.d.ts",
+      "import": "./dist/esm/agent.js",
+      "require": "./dist/cjs/agent.js"
+    }
+  },
+  "scripts": {
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc -p tsconfig.esm.json && tsc -p tsconfig.cjs.json && node scripts/fix-esm.mjs && node scripts/write-pkg-markers.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test tests/",
+    "prepublishOnly": "npm run build && npm run typecheck"
+  },
+  "dependencies": {
+    "jszip": "^3.10.1",
+    "zod": "^3.23.8"
+  },
+  "module": "./dist/esm/index.js"
+}
