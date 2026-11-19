@@ -18,9 +18,38 @@
 
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { BUILTIN_BUNDLES, isBundleInstalled, type PluginCategory } from "./plugin-library";
+import { isBundleInstalled } from "./plugin-library";
+import type { LibraryBundle } from "./plugin-library/types";
 
 const STATE_FILE = "bundles.json";
+
+/**
+ * Where the library bundles come from.
+ *
+ * They are marketplace data, so the SDK cannot know them — but the hook gate
+ * (`loadToolHooks` → `loadEnabledBundleRules`) runs deep inside tool dispatch
+ * and has no caller to take them from. The host registers a provider once:
+ *
+ *   configureLibraryBundles(async () => materializeBundles(await getPluginBundles()))
+ *
+ * Unconfigured, there are no library bundles and no library rules — fail closed,
+ * same policy as the approval store.
+ */
+type BundleProvider = () => readonly LibraryBundle[] | Promise<readonly LibraryBundle[]>;
+let bundleProvider: BundleProvider = () => [];
+
+export function configureLibraryBundles(provider: BundleProvider): void {
+  bundleProvider = provider;
+}
+
+async function currentBundles(): Promise<readonly LibraryBundle[]> {
+  try {
+    return await bundleProvider();
+  } catch {
+    // A catalogue outage must not break the hook gate — no bundles, no rules.
+    return [];
+  }
+}
 
 export interface BundleStateEntry {
   enabled: boolean;
@@ -31,8 +60,8 @@ export interface BundleStateEntry {
 export type BundleState = Record<string, BundleStateEntry>;
 
 /** Raw deny/notify rules for a catalog slug, or null. */
-function catalogRules(slug: string): { deny: string[]; notify: string[] } | null {
-  const entry = BUILTIN_BUNDLES.find((b) => b.slug === slug);
+function catalogRules(bundles: readonly LibraryBundle[], slug: string): { deny: string[]; notify: string[] } | null {
+  const entry = bundles.find((b) => b.slug === slug);
   if (!entry?.bundle.hooks || typeof entry.bundle.hooks !== "object") return null;
   const hooks = entry.bundle.hooks as { deny?: unknown; notify?: unknown };
   return {
@@ -65,12 +94,16 @@ async function writeBundleState(workspaceRoot: string, state: BundleState): Prom
  * Record an install: enabled by default, rules snapshotted from the catalog.
  * Called by the install route; idempotent (reinstall refreshes the snapshot).
  */
-export async function recordBundleInstall(workspaceRoot: string, slug: string): Promise<void> {
+export async function recordBundleInstall(
+  bundles: readonly LibraryBundle[],
+  workspaceRoot: string,
+  slug: string,
+): Promise<void> {
   const state = await readBundleState(workspaceRoot);
   state[slug] = {
     enabled: true,
     installedAt: new Date().toISOString(),
-    ...(catalogRules(slug) ? { rules: catalogRules(slug)! } : {}),
+    ...(catalogRules(bundles, slug) ? { rules: catalogRules(bundles, slug)! } : {}),
   };
   await writeBundleState(workspaceRoot, state);
 }
@@ -81,17 +114,18 @@ export async function recordBundleInstall(workspaceRoot: string, slug: string): 
  * slug is unknown.
  */
 export async function setBundleEnabled(
+  bundles: readonly LibraryBundle[],
   workspaceRoot: string,
   slug: string,
-  enabled: boolean
+  enabled: boolean,
 ): Promise<BundleStateEntry | null> {
-  if (!BUILTIN_BUNDLES.some((b) => b.slug === slug)) return null;
+  if (!bundles.some((b) => b.slug === slug)) return null;
   const state = await readBundleState(workspaceRoot);
   const existing = state[slug];
   state[slug] = {
     enabled,
     ...(existing?.installedAt ? { installedAt: existing.installedAt } : {}),
-    ...(existing?.rules ?? (catalogRules(slug) ? { rules: catalogRules(slug)! } : {})),
+    ...(existing?.rules ?? (catalogRules(bundles, slug) ? { rules: catalogRules(bundles, slug)! } : {})),
   };
   await writeBundleState(workspaceRoot, state);
   return state[slug];
@@ -116,7 +150,11 @@ export interface EnabledBundleRules {
  * loadToolHooks — must never throw and must stay cheap (a handful of stats
  * + one small file read, cached upstream for 60s).
  */
-export async function loadEnabledBundleRules(workspaceRoot: string): Promise<EnabledBundleRules> {
+export async function loadEnabledBundleRules(
+  workspaceRoot: string,
+  bundles?: readonly LibraryBundle[],
+): Promise<EnabledBundleRules> {
+  const catalog = bundles ?? (await currentBundles());
   const out: EnabledBundleRules = { deny: [], notify: [], active: [] };
   let state: BundleState = {};
   try {
@@ -124,16 +162,16 @@ export async function loadEnabledBundleRules(workspaceRoot: string): Promise<Ena
   } catch {
     return out;
   }
-  for (const bundle of BUILTIN_BUNDLES) {
+  for (const bundle of catalog) {
     if (state[bundle.slug]?.enabled === false) continue; // explicit off
     let installed = false;
     try {
-      installed = await isBundleInstalled(workspaceRoot, bundle.slug);
+      installed = await isBundleInstalled(catalog, workspaceRoot, bundle.slug);
     } catch {
       installed = false;
     }
     if (!installed) continue;
-    const rules = state[bundle.slug]?.rules ?? catalogRules(bundle.slug);
+    const rules = state[bundle.slug]?.rules ?? catalogRules(catalog, bundle.slug);
     if (!rules) continue;
     out.deny.push(...rules.deny);
     out.notify.push(...rules.notify);
@@ -142,7 +180,3 @@ export async function loadEnabledBundleRules(workspaceRoot: string): Promise<Ena
   return out;
 }
 
-/** Category of a slug (for the API/UI), or null if unknown. */
-function bundleCategory(slug: string): PluginCategory | null {
-  return BUILTIN_BUNDLES.find((b) => b.slug === slug)?.category ?? null;
-}

@@ -19,9 +19,9 @@ touched through dynamic `import()`.
 | Import | Contents |
 | --- | --- |
 | `@orplex/sdk/tools` | Tool definitions, `dispatchToolCall`, file ops, exec guard, risk classifier, approval store, tool chain/hooks, archive extraction, ports |
-| `@orplex/sdk/mcp` | MCP catalog, client, gateway, dispatch lane |
+| `@orplex/sdk/mcp` | MCP entry schema + search, client, gateway, dispatch lane |
 | `@orplex/sdk/skills` | Skill loading, frontmatter parsing, roster rendering |
-| `@orplex/sdk/plugins` | Plugin registry, hook compiler, bundle parser, built-in bundles |
+| `@orplex/sdk/plugins` | Plugin registry, hook compiler, bundle parser, library materializer |
 | `@orplex/sdk/cloud` | Split-deployment API client (base URL, credentials) |
 | `@orplex/sdk/marketplace` | Signed catalog fetch, verification, cache and resolution |
 | `@orplex/sdk/agent` | The agent loop (turn engine) over an injected model client |
@@ -74,6 +74,50 @@ configureApprovals({
 
 Low-risk calls are auto-approved by the risk classifier before they reach the store.
 
+## Catalogues are data, not code (0.3.0)
+
+Earlier versions shipped the skill catalogue, the MCP server catalogue and the 40 plugin
+bundles inside the package. They no longer exist here — a catalogue that changes weekly
+does not belong in a versioned library. The SDK keeps the **shapes, the search and the
+materializer**; the host supplies the entries, usually from the signed marketplace.
+
+```ts
+import { searchMcpCatalog, validateMcpCatalog, applyOAuthEnvOverrides } from "@orplex/sdk/mcp";
+import { materializeBundles, listLibrary, isBundleInstalled, configureLibraryBundles } from "@orplex/sdk/plugins";
+
+const catalog = applyOAuthEnvOverrides(await getMarketplaceMcpServers());
+validateMcpCatalog(catalog);                            // throws/report on a malformed entry
+searchMcpCatalog("air", "all", 20, catalog);
+
+const bundles = materializeBundles(await getMarketplacePluginBundles());
+listLibrary(bundles);                                   // rows for the Plugins page
+
+// The hook gate runs inside tool dispatch and cannot take a parameter, so the
+// host registers a provider once. Unconfigured = no library rules (fail closed).
+configureLibraryBundles(async () => materializeBundles(await getMarketplacePluginBundles()));
+```
+
+Breaking changes in 0.3.0:
+
+| Removed | Replace with |
+| --- | --- |
+| `SKILL_CATEGORIES`, `ALL_SKILLS` | your catalogue + `flattenSkills` / `searchSkills` / `getSkillById` |
+| `MCP_CATALOG`, `MCP_CATALOG_SIZE` | your catalogue; size is `catalog.length` |
+| `getMcpCatalogEntry(id)` | `getMcpCatalogEntry(id, catalog)` |
+| `searchMcpCatalog(q, cat, limit)` | `searchMcpCatalog(q, cat, limit, catalog)` |
+| `BUILTIN_BUNDLES` | `materializeBundles(defs)` on marketplace data |
+| `materializeBundle(slug)` / `isBundleInstalled(root, slug)` / `listLibrary()` | same calls, bundle list first |
+| `loadEnabledBundleRules(root)` | unchanged signature; bundles come from `configureLibraryBundles` |
+
+`MCP_CATEGORIES` (the 14 display labels) stays: it is taxonomy, not catalogue content.
+
+### 0.3.1
+
+`mcpCatalogEntrySchema` now requires a transport (`stdio` or `remote`). An entry
+with neither validates as an object but cannot be connected to, so it used to be
+accepted and then fail at connect time. All 100 entries in the published
+marketplace catalogue still validate.
+
 ## Marketplace
 
 The app never trusts a catalog blob. The index is Ed25519-signed over canonical JSON, and
@@ -99,15 +143,13 @@ seed → empty.
 
 ## Status
 
-Working and tested today: the full tool surface (write/edit/read/search/exec guards), MCP
-client + gateway, skills, plugins, cloud client, marketplace verification.
+Working and tested: the full tool surface (write/edit/read/search/exec guards), MCP client +
+gateway + dispatch lane, skills, plugins, cloud client, marketplace verification, and the
+agent loop.
 
-In progress:
-
-- the app still imports these modules directly; switching it to `@orplex/sdk/*` is the next
-  step, one module at a time behind re-export shims
-- the marketplace catalog is populated from the app's current built-ins
-- the loop engine (`/agent`) is exported but not yet driven by a public model-client contract
+The desktop app is fully migrated: it imports these modules from the package behind
+one-line re-export shims, and reads skills, MCP servers and plugin bundles from the signed
+marketplace instead of shipping them.
 
 ## License
 

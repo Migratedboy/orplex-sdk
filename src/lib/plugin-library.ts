@@ -1,6 +1,7 @@
-// plugin-library.ts — Built-in plugin bundle library: the public surface.
-// Bundle definitions live in plugin-library/ (one file per category); this
-// module materializes them into installable units for the SAME installPlugin()
+// plugin-library.ts — Plugin bundle library: materialization and lookups.
+//
+// The bundle DEFINITIONS are marketplace data (signed, fetched by the host) —
+// this module only materializes them into installable units for the SAME installPlugin()
 // path workspace bundles use (existing user files always win). A bundle is
 // "installed" when its first skill exists in the workspace — content-based,
 // so a bundle installed by hand still shows green.
@@ -8,22 +9,10 @@
 import { access } from "node:fs/promises";
 import { join } from "node:path";
 import type { ParsedPlugin } from "./plugin-bundles";
-import { QUALITY_BUNDLES } from "./plugin-library/quality";
-import { SECURITY_BUNDLES } from "./plugin-library/security";
-import { DEVOPS_BUNDLES } from "./plugin-library/devops";
-import { INTELLIGENCE_BUNDLES } from "./plugin-library/intelligence";
 import type { BundleDef, LibraryBundle, PluginCategory } from "./plugin-library/types";
 
-export type { PluginCategory } from "./plugin-library/types";
+export type { PluginCategory, BundleDef, LibraryBundle } from "./plugin-library/types";
 
-/** All built-in bundles, in category order (quality → intelligence). */
-export const BUILTIN_BUNDLES: LibraryBundle[] = [
-  ...QUALITY_BUNDLES,
-  ...SECURITY_BUNDLES,
-  ...DEVOPS_BUNDLES,
-  ...([] as BundleDef[]),
-  ...INTELLIGENCE_BUNDLES,
-].map(materialize);
 
 /** One-line value safe for the tiny `key: value` frontmatter parser. */
 function oneLine(value: string, max: number): string {
@@ -72,9 +61,17 @@ function materialize(def: BundleDef): LibraryBundle {
   };
 }
 
+/**
+ * Turn marketplace bundle data into installable units. Call this once on the
+ * verified catalogue — materializing builds each bundle's SKILL.md text.
+ */
+export function materializeBundles(defs: readonly BundleDef[]): LibraryBundle[] {
+  return defs.map((def) => materialize(def));
+}
+
 /** Materialize a library slug, or null if unknown. */
-export function materializeBundle(slug: string): ParsedPlugin | null {
-  const entry = BUILTIN_BUNDLES.find((b) => b.slug === slug);
+export function materializeBundle(bundles: readonly LibraryBundle[], slug: string): ParsedPlugin | null {
+  const entry = bundles.find((b) => b.slug === slug);
   return entry ? entry.bundle : null;
 }
 
@@ -82,8 +79,12 @@ export function materializeBundle(slug: string): ParsedPlugin | null {
  * Is this bundle already installed in the workspace? Content-based: the
  * bundle's first skill existing under .orplex/skills/ means yes.
  */
-export async function isBundleInstalled(workspaceRoot: string, slug: string): Promise<boolean> {
-  const entry = BUILTIN_BUNDLES.find((b) => b.slug === slug);
+export async function isBundleInstalled(
+  bundles: readonly LibraryBundle[],
+  workspaceRoot: string,
+  slug: string,
+): Promise<boolean> {
+  const entry = bundles.find((b) => b.slug === slug);
   if (!entry || entry.bundle.skills.length === 0) return false;
   const first = entry.bundle.skills[0].name.replace(/[^\w.-]/g, "_").slice(0, 64);
   try {
@@ -95,7 +96,7 @@ export async function isBundleInstalled(workspaceRoot: string, slug: string): Pr
 }
 
 /** Library listing for the API/UI (no fs access needed for the catalog itself). */
-export function listLibrary(): Array<{
+export function listLibrary(bundles: readonly LibraryBundle[]): Array<{
   slug: string;
   name: string;
   category: PluginCategory;
@@ -105,7 +106,7 @@ export function listLibrary(): Array<{
   hasHooks: boolean;
   hasMcp: boolean;
 }> {
-  return BUILTIN_BUNDLES.map((b) => ({
+  return bundles.map((b) => ({
     slug: b.slug,
     name: b.slug,
     category: b.category,

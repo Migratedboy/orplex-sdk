@@ -1,7 +1,7 @@
 {
   "name": "@orplex/sdk",
-  "version": "0.1.1",
-  "description": "Orplex agent SDK — AI tools, MCP gateway, skills, plugins, cloud client and marketplace client. Framework-free core of Orplex Code.",
+  "version": "0.3.1",
+  "description": "Framework-free core of Orplex Code: AI tool layer, MCP gateway, skills, plugins, cloud client, signed marketplace resolver",
   "license": "MIT",
   "type": "module",
   "engines": {
@@ -73,6 +73,11 @@
       "types": "./dist/esm/agent.d.ts",
       "import": "./dist/esm/agent.js",
       "require": "./dist/cjs/agent.js"
+    },
+    "./lib/*": {
+      "types": "./dist/esm/lib/*.d.ts",
+      "import": "./dist/esm/lib/*.js",
+      "require": "./dist/cjs/lib/*.js"
     }
   },
   "scripts": {

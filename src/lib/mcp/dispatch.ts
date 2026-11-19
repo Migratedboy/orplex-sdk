@@ -11,7 +11,6 @@
 import { findRemote, parseMcpToolName } from "./registry";
 import { withConnection } from "./client";
 import { apiFetch } from "../api-base";
-import { getMcpCatalogEntry } from "../mcp-catalog";
 
 const MAX_RESULT_CHARS = 20_000;
 
@@ -20,6 +19,12 @@ interface McpToolCtx {
   setStatus(status: string, detail: string): void;
   appendDisplay(text: string): void;
   syncDisplay(): void;
+  /**
+   * Human label for a server id ("Airtable"). Optional: the catalogue is
+   * marketplace data, so the host supplies it; without it the id is shown,
+   * which is terse but never wrong.
+   */
+  serverLabel?(serverId: string): string | undefined;
 }
 
 export async function dispatchMcpToolCall(
@@ -91,7 +96,7 @@ export async function dispatchMcpToolCallSdk(
       blocked: false,
     };
   }
-  const label = getMcpCatalogEntry(parsed.serverId)?.name ?? parsed.serverId;
+  const label = ctx.serverLabel?.(parsed.serverId) ?? parsed.serverId;
   const { name: _name, ...args } = call;
 
   ctx.setStatus("tool_executing", `MCP ${label}: ${parsed.toolName}…`);
