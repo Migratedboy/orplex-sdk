@@ -1,0 +1,52 @@
+name: publish
+
+# Releases are published only from a tag, only from CI, and only with a
+# provenance attestation — a locally built tarball can be anything.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and verify, do not publish"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  id-token: write # npm provenance (OIDC)
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - run: node scripts/verify-exports.mjs
+      - run: node --test tests/
+
+      - name: version matches the tag
+        shell: bash
+        run: |
+          PKG=$(node -p "require('./package.json').version")
+          TAG="${GITHUB_REF_NAME#v}"
+          if [ "${{ github.event_name }}" = "push" ] && [ "$PKG" != "$TAG" ]; then
+            echo "::error::package.json is $PKG but the tag says $TAG"
+            exit 1
+          fi
+          echo "publishing $PKG"
+
+      - name: publish
+        if: ${{ github.event_name == 'push' || inputs.dry_run == false }}
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

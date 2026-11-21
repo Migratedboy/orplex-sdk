@@ -1,0 +1,60 @@
+name: ci
+
+# Every gate that a published artifact must pass, on the versions this SDK
+# claims to support. The publish job reuses these steps, so a release can never
+# be built by a path that the PR checks do not exercise.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: node ${{ matrix.node }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: ["20", "22", "24"]
+        exclude:
+          # One Windows lane is enough — the differences it covers (shims,
+          # taskkill, path separators) do not vary by Node version.
+          - os: windows-latest
+            node: "24"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - run: npm ci
+
+      # 1. The types must hold with no implicit escape hatches.
+      - run: npm run typecheck
+
+      # 2. Both module formats are built from one source.
+      - run: npm run build
+
+      # 3. Every `exports` subpath loads in CJS *and* ESM with the same surface.
+      - run: node scripts/verify-exports.mjs
+
+      # 4. Contract tests run against dist/, i.e. the thing users install.
+      - run: node --test tests/
+
+      # 5. The tarball stays the size we promise, and contains what we claim.
+      - name: pack budget
+        shell: bash
+        run: |
+          npm pack --silent > /dev/null
+          SIZE=$(node -e "const p=require('./package.json');const fs=require('fs');const f=fs.readdirSync('.').find(n=>n.endsWith('.tgz'));console.log(Math.round(fs.statSync(f).size/1024))")
+          echo "tarball: ${SIZE} KiB"
+          test "$SIZE" -lt 1200 || { echo "::error::tarball grew past the 1200 KiB budget (${SIZE} KiB)"; exit 1; }
+          rm -f ./*.tgz

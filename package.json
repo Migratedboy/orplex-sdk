@@ -1,6 +1,6 @@
 {
   "name": "@orplex/sdk",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Framework-free core of Orplex Code: AI tool layer, MCP gateway, skills, plugins, cloud client, signed marketplace resolver",
   "license": "MIT",
   "type": "module",
@@ -28,6 +28,7 @@
     "dist",
     "!dist/**/*.map",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "main": "./dist/cjs/index.js",
@@ -78,14 +79,16 @@
       "types": "./dist/esm/lib/*.d.ts",
       "import": "./dist/esm/lib/*.js",
       "require": "./dist/cjs/lib/*.js"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "scripts": {
     "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
     "build": "npm run clean && tsc -p tsconfig.esm.json && tsc -p tsconfig.cjs.json && node scripts/fix-esm.mjs && node scripts/write-pkg-markers.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test tests/",
-    "prepublishOnly": "npm run build && npm run typecheck"
+    "test": "node scripts/verify-exports.mjs && node --test tests/",
+    "prepublishOnly": "npm run ci",
+    "ci": "npm run typecheck && npm run build && node scripts/verify-exports.mjs && node --test tests/"
   },
   "dependencies": {
     "jszip": "^3.10.1",
@@ -95,5 +98,8 @@
   "devDependencies": {
     "@types/node": "^22.10.2",
     "typescript": "^5.7.2"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

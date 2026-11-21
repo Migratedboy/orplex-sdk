@@ -16,11 +16,18 @@
 
 import { spawn } from "child_process";
 import { createHash } from "crypto";
+import { getAgentRuntimeConfig } from "./runtime-config";
+import { SdkError, toSdkError } from "./errors";
+import { buildChildEnv } from "./mcp/env-scope";
+import { trackProcess, untrackProcess, killTree, shutdownAllSpawnedProcesses } from "./mcp/process-registry";
 
 const MAX_SERVERS = 2;
-const CALL_TIMEOUT_MS = 120_000;
 const IDLE_REAP_MS = 5 * 60_000;
-const STARTUP_TIMEOUT_MS = 15_000;
+
+/** The configured stdio call ceiling (0 = no ceiling). Read per call, not cached. */
+function callTimeoutMs(): number {
+  return getAgentRuntimeConfig().mcpToolTimeoutMs;
+}
 
 export interface McpToolDef {
   server: string;
@@ -64,6 +71,12 @@ export interface McpServerConfig {
   command: string;
   args?: string[];
   env?: Record<string, string>;
+  /**
+   * Names of the environment variables this server's manifest declares it
+   * accepts (marketplace `stdio.env[].name`). Used to warn when the host hands
+   * over something undeclared — the scope itself is enforced by env-scope.ts.
+   */
+  declaredEnv?: string[];
 }
 
 /** Read `mcpServers` from orplex.config.json (Claude Code config shape). */
@@ -156,11 +169,16 @@ class StdioMcpServer implements McpServerHandle {
 
     this.proc = spawn(command, args, {
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, ...(cfg.env ?? {}) },
+      // Third-party code: scoped environment (see mcp/env-scope.ts). Never
+      // process.env — a marketplace server must not see the host's secrets.
+      env: buildChildEnv(cfg, { label: this.server }).env,
       windowsHide: true,
       detached: false,
     });
     this.exited = false;
+    // Track the PID, not just the handle: on Windows this child is a cmd.exe
+    // shim that forks the real server, so a later kill must walk the tree.
+    trackProcess(this.proc.pid, { server: this.server, command: cfg.command });
 
     // Spawn failures (command not found, permission denied) arrive as an
     // 'error' event — unhandled, it would crash the server process. Name the
@@ -169,6 +187,7 @@ class StdioMcpServer implements McpServerHandle {
     // blender-style report).
     this.proc.on("error", (err: NodeJS.ErrnoException) => {
       this.exited = true;
+      untrackProcess(this.proc?.pid);
       this.proc = null;
       const enoent = err.code === "ENOENT";
       // npx/uvx ride cmd.exe on Windows, so ENOENT here most often means the
@@ -182,7 +201,12 @@ class StdioMcpServer implements McpServerHandle {
         : `: ${err.message}`;
       for (const [, p] of this.pending) {
         clearTimeout(p.timer);
-        p.reject(new Error(`MCP server "${this.server}" failed to start${hint}${enoent ? ` (launching: ${cfg.command})` : ""}`));
+        p.reject(
+          new SdkError("MCP_SPAWN_FAILED", `MCP server "${this.server}" failed to start${hint}${enoent ? ` (launching: ${cfg.command})` : ""}`, {
+            hint: enoent ? "install the runner, then reconnect" : "check the command and its arguments",
+            cause: err,
+          }),
+        );
       }
       this.pending.clear();
     });
@@ -217,30 +241,48 @@ class StdioMcpServer implements McpServerHandle {
 
     this.proc.on("exit", () => {
       this.exited = true;
+      untrackProcess(this.proc?.pid);
       this.proc = null;
       for (const [, p] of this.pending) {
         clearTimeout(p.timer);
-        p.reject(new Error("MCP server exited unexpectedly"));
+        p.reject(
+          new SdkError("MCP_CRASHED", `MCP server "${this.server}" exited unexpectedly`, {
+            hint: "the server will be respawned on the next call",
+          }),
+        );
       }
       this.pending.clear();
     });
   }
 
   private async rpc(method: string, params: Record<string, unknown>): Promise<unknown> {
-    if (!this.proc || this.exited) throw new Error("MCP server not running");
+    if (!this.proc || this.exited) {
+      throw new SdkError("MCP_CRASHED", `MCP server "${this.server}" is not running`, { hint: "it is respawned on the next call" });
+    }
     const id = this.nextId++;
     const msg = JSON.stringify({ jsonrpc: "2.0", id, method, params });
+    const timeoutMs = callTimeoutMs();
     return new Promise<unknown>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error(`MCP ${method} timed out after ${CALL_TIMEOUT_MS / 1000}s`));
-      }, CALL_TIMEOUT_MS);
-      this.pending.set(id, { resolve, reject, timer });
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      if (timeoutMs > 0) {
+        timer = setTimeout(() => {
+          this.pending.delete(id);
+          reject(
+            new SdkError("MCP_TIMEOUT", `MCP ${method} timed out after ${timeoutMs / 1000}s`, {
+              hint: "the server did not answer; raise mcpToolTimeoutMs or reconnect it",
+            }),
+          );
+        }, timeoutMs);
+      }
+      const clear = () => {
+        if (timer) clearTimeout(timer);
+      };
+      this.pending.set(id, { resolve, reject, timer: timer as ReturnType<typeof setTimeout> });
       this.proc!.stdin!.write(msg + "\n", (err) => {
         if (err) {
-          clearTimeout(timer);
+          clear();
           this.pending.delete(id);
-          reject(new Error(`MCP write failed: ${err.message}`));
+          reject(new SdkError("MCP_CRASHED", `MCP write failed: ${err.message}`, { hint: "the server process is gone; it respawns on the next call" }));
         }
       });
     });
@@ -275,14 +317,19 @@ class StdioMcpServer implements McpServerHandle {
 
   async shutdown(): Promise<void> {
     const proc = this.proc;
+    const pid = proc?.pid;
     this.proc = null;
     this.exited = true;
     for (const [, p] of this.pending) {
       clearTimeout(p.timer);
-      p.reject(new Error("MCP server shut down"));
+      p.reject(new SdkError("MCP_CRASHED", `MCP server "${this.server}" shut down`, { hint: "reconnect the server to use it again" }));
     }
     this.pending.clear();
-    if (proc) {
+    if (pid) {
+      untrackProcess(pid);
+      // Kill the tree, not just the shim: cmd.exe -> npx -> node must all go.
+      await killTree(pid);
+    } else if (proc) {
       try {
         proc.kill();
       } catch {}
@@ -405,14 +452,24 @@ export async function shutdownAccountSession(
 }
 
 /** Kill everything (executor shutdown / tests). */
-async function shutdownAllMcp(): Promise<void> {
+/**
+ * Shut every MCP server down and reap anything still tracked.
+ *
+ * The host calls this once on quit (Electron `before-quit`). Session handles
+ * normally kill their own trees; the registry sweep catches children whose
+ * handle was lost — a crashed shim, a server that ignored SIGTERM, or a spawn
+ * that died between `spawn()` and the first `exit` event.
+ */
+export async function shutdownAllMcp(): Promise<{ sessions: number; processes: number }> {
   const all = [...sessions.values()];
   sessions.clear();
   if (reapTimer) {
     clearInterval(reapTimer);
     reapTimer = null;
   }
-  await Promise.all(all.map((s) => s.handle.shutdown()));
+  await Promise.all(all.map((s) => s.handle.shutdown().catch(() => {})));
+  const processes = await shutdownAllSpawnedProcesses();
+  return { sessions: all.length, processes };
 }
 
 /** Test seam: forget cached sessions without killing processes. */
