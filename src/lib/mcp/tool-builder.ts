@@ -11,6 +11,7 @@
 // schemaChars is what the prompt meter accounts against MCP schemas.
 
 import { mcpToolName, type McpToolAnnotations } from "./registry";
+import { routeTools, type RouteOptions } from "./dynamic-tools";
 
 export interface BuilderTool {
   /** serverId — catalog slug or legacy remote id (the mcp__ segment). */
@@ -49,6 +50,14 @@ export interface McpRoster {
   metaDefs: McpModelToolDef[];
   /** Serialized chars of defs + metaDefs — the meter's MCP-schema count (C10). */
   schemaChars: number;
+  /** Present when dynamic routing ran: which tools kept a schema this turn. */
+  routing?: {
+    applied: boolean;
+    active: string[];
+    hidden: string[];
+    /** Pins that matched no tool — a host typo, surfaced rather than ignored. */
+    unmatchedPins: string[];
+  };
 }
 
 // Always-on MCP discovery tools: even under the cap the model gets
@@ -114,10 +123,20 @@ function fingerprint(t: BuilderTool): string {
  * Build everything the model-facing surfaces need from one tool list.
  * serverMeta (optional): serverId → { label, description } for display.
  */
-export function buildMcpRoster(
-  tools: BuilderTool[],
-  opts?: { serverMeta?: Record<string, { label?: string; description?: string }> }
-): McpRoster {
+export interface BuildRosterOptions {
+  serverMeta?: Record<string, { label?: string; description?: string }>;
+  /**
+   * Rank the roster against the current turn. Omit for the historical
+   * behaviour (everything shown, cap-driven shaping only).
+   */
+  route?: RouteOptions;
+}
+
+/**
+ * Build everything the model-facing surfaces need from one tool list.
+ * serverMeta (optional): serverId → { label, description } for display.
+ */
+export function buildMcpRoster(tools: BuilderTool[], opts?: BuildRosterOptions): McpRoster {
   const meta = opts?.serverMeta ?? {};
   const seen = new Set<string>();
   const deduped: BuilderTool[] = [];
@@ -131,7 +150,13 @@ export function buildMcpRoster(
   const toolCount = deduped.length;
   const overCap = toolCount > MCP_TOOL_CAP;
 
-  const defs: McpModelToolDef[] = deduped.map((t) =>
+  // Routing decides WHICH tools get a schema; the cap decides how fat each one
+  // may be. Both can apply at once (a routed subset still names-only if the
+  // full set blew the cap).
+  const routed = opts?.route ? routeTools(deduped, opts.route) : null;
+  const shown = routed?.applied ? routed.active : deduped;
+
+  const defs: McpModelToolDef[] = shown.map((t) =>
     overCap
       ? {
           name: mcpToolName(t.server, t.name),
@@ -172,6 +197,16 @@ export function buildMcpRoster(
     defs,
     metaDefs,
     schemaChars,
+    ...(routed
+      ? {
+          routing: {
+            applied: routed.applied,
+            active: routed.active.map((t) => mcpToolName(t.server, t.name)),
+            hidden: routed.hidden.map((t) => mcpToolName(t.server, t.name)),
+            unmatchedPins: routed.unmatchedPins,
+          },
+        }
+      : {}),
   };
 }
 
@@ -205,6 +240,29 @@ export function mcpPromptSection(roster: McpRoster): string {
   }
 
   const lines: string[] = [];
+
+  // Routed turn: schemas for the ranked subset, bare names for the rest. The
+  // hidden tools stay callable — mcp_call executes whatever exists on the
+  // server — so the roster says "available on request", not "gone".
+  if (roster.routing?.applied && !roster.overCap) {
+    const activeNames = new Set(roster.routing.active);
+    const hiddenNames = roster.routing.hidden;
+    for (const s of roster.servers) {
+      const shownTools = (byServer.get(s.name) ?? []).filter((t) => activeNames.has(mcpToolName(t.server, t.name)));
+      if (!shownTools.length) continue;
+      lines.push(`### Server "${s.label}"`);
+      for (const t of shownTools) {
+        const props = (t.inputSchema as { properties?: Record<string, unknown> } | undefined)?.properties;
+        const paramNames = props && typeof props === "object" ? Object.keys(props) : [];
+        const params = paramNames.length ? `(${paramNames.join(", ")})` : "()";
+        lines.push(`- \`${mcpToolName(t.server, t.name)}\`${params} — ${normalizeDescription(t.description, MCP_ROSTER_DESC_MAX)}`);
+      }
+    }
+    const hiddenBlock = hiddenNames.length
+      ? `\n\n## MORE MCP TOOLS — ${hiddenNames.length} not loaded this turn\n\nThese are connected and callable; their schemas were left out to keep this prompt small. Find the right one with \`${MCP_SEARCH_TOOL}({ query: "..." })\`, read its exact parameters with \`${MCP_DESCRIBE_TOOL}({ tool: "..." })\`, then call it with mcp_call.\n${hiddenNames.map((n) => `- \`${n}\``).join("\n")}`
+      : "";
+    return `## MCP CONNECTOR TOOLS — ${roster.routing.active.length} of ${roster.toolCount} external tools loaded\n\nThe tools below are the ones relevant to this request, with full parameters. Call them directly if your function list includes their names, otherwise with the built-in tool mcp_call: mcp_call({serverId: "<server id>", tool: "<tool name>", arguments: {…}}). Never invent server ids or tool names.\n\n${lines.join("\n")}${hiddenBlock}`;
+  }
   if (roster.overCap) {
     for (const s of roster.servers) {
       lines.push(`### Server "${s.label}"`);

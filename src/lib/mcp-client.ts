@@ -19,10 +19,13 @@ import { createHash } from "crypto";
 import { getAgentRuntimeConfig } from "./runtime-config";
 import { SdkError, toSdkError } from "./errors";
 import { buildChildEnv } from "./mcp/env-scope";
+import { validateToolArgs } from "./mcp/validate-args";
 import { trackProcess, untrackProcess, killTree, shutdownAllSpawnedProcesses } from "./mcp/process-registry";
 
 const MAX_SERVERS = 2;
 const IDLE_REAP_MS = 5 * 60_000;
+/** A child that survives this long is healthy, not crash-looping. */
+const STABLE_MS = 30_000;
 
 /** The configured stdio call ceiling (0 = no ceiling). Read per call, not cached. */
 function callTimeoutMs(): number {
@@ -118,6 +121,15 @@ class StdioMcpServer implements McpServerHandle {
   private buffer = "";
   private tools: McpToolDef[] | null = null;
   private exited = false;
+  /** Last spawn config — respawn after a crash needs it. */
+  private cfg: McpServerConfig | null = null;
+  /** Consecutive crash respawns since the last STABLE period. */
+  private respawns = 0;
+  /** When the current child was spawned — see the stability window below. */
+  private spawnedAt = 0;
+  private respawnTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Set by shutdown(): an exit we caused is not a crash. */
+  private closing = false;
 
   /** True while a live child process is attached. */
   get alive(): boolean {
@@ -130,6 +142,7 @@ class StdioMcpServer implements McpServerHandle {
 
   private async ensureProc(cfg: McpServerConfig): Promise<void> {
     if (this.proc && !this.exited) return;
+    this.cfg = cfg;
     this.buffer = "";
     this.tools = null;
 
@@ -176,6 +189,7 @@ class StdioMcpServer implements McpServerHandle {
       detached: false,
     });
     this.exited = false;
+    this.spawnedAt = Date.now();
     // Track the PID, not just the handle: on Windows this child is a cmd.exe
     // shim that forks the real server, so a later kill must walk the tree.
     trackProcess(this.proc.pid, { server: this.server, command: cfg.command });
@@ -239,7 +253,7 @@ class StdioMcpServer implements McpServerHandle {
       /* servers log to stderr; swallowed (bounded by OS pipe) */
     });
 
-    this.proc.on("exit", () => {
+    this.proc.on("exit", (code: number | null, signal: string | null) => {
       this.exited = true;
       untrackProcess(this.proc?.pid);
       this.proc = null;
@@ -252,7 +266,51 @@ class StdioMcpServer implements McpServerHandle {
         );
       }
       this.pending.clear();
+      if (this.closing) return;
+      // Crash recovery: a marketplace server that dies on its own (OOM, bad
+      // update, transient network for a remote-backed tool) used to stay dead
+      // until the app restarted. Respawn with exponential backoff, bounded by
+      // the host's policy, and give up with a line the host can log.
+      this.scheduleRespawn(code, signal);
     });
+  }
+
+  /** Bounded exponential backoff; `mcpRespawn.maxAttempts: 1` disables it. */
+  private scheduleRespawn(code: number | null, signal: string | null): void {
+    const cfg = this.cfg;
+    const policy = getAgentRuntimeConfig().mcpRespawn;
+    const allowed = Math.max(1, policy.maxAttempts) - 1;
+    if (!cfg || allowed <= 0) return;
+    if (this.respawns >= allowed) {
+      getAgentRuntimeConfig().logger.error("MCP server keeps crashing; giving up", {
+        server: this.server,
+        attempts: this.respawns,
+        code,
+        signal,
+      });
+      return;
+    }
+    this.respawns += 1;
+    const delay = Math.min(policy.baseDelayMs * 2 ** (this.respawns - 1), policy.maxDelayMs);
+    getAgentRuntimeConfig().logger.warn("MCP server exited; respawning", {
+      server: this.server,
+      attempt: this.respawns,
+      of: allowed,
+      delayMs: delay,
+      code,
+      signal,
+    });
+    this.respawnTimer = setTimeout(() => {
+      this.respawnTimer = null;
+      void this.ensureProc(cfg).catch((err: unknown) => {
+        getAgentRuntimeConfig().logger.error("MCP respawn failed", {
+          server: this.server,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }, delay);
+    // Never hold the host process open just to retry a dead connector.
+    this.respawnTimer.unref?.();
   }
 
   private async rpc(method: string, params: Record<string, unknown>): Promise<unknown> {
@@ -291,6 +349,10 @@ class StdioMcpServer implements McpServerHandle {
   async listTools(): Promise<McpToolDef[]> {
     if (this.tools) return this.tools;
     const result = (await this.rpc("tools/list", {})) as { tools?: Array<{ name: string; description?: string; inputSchema?: unknown }> };
+    // Reset the crash budget only for a child that has proven STABLE. Resetting
+    // on every successful call would let a server that answers once and then
+    // dies respawn forever — exactly the crash loop this budget exists to stop.
+    if (Date.now() - this.spawnedAt > STABLE_MS) this.respawns = 0;
     this.tools = (result.tools ?? []).map((t) => ({
       server: this.server,
       name: t.name,
@@ -301,6 +363,23 @@ class StdioMcpServer implements McpServerHandle {
   }
 
   async callTool(toolName: string, args: Record<string, unknown>): Promise<string> {
+    // Local pre-flight (runtime-config.validateToolArgs): the server's own
+    // rejection arrives late and in its own words, and the model retries
+    // blind. Only tools we have a schema for are checked — a tool the model
+    // learned about through mcp_search_tools is validated the same way once
+    // tools/list has run, which getMcpServerForRun always does.
+    if (getAgentRuntimeConfig().validateToolArgs && this.tools) {
+      const known = this.tools.find((t) => t.name === toolName);
+      if (known) {
+        const check = validateToolArgs(known.inputSchema, args);
+        if (!check.ok) {
+          throw new SdkError("MCP_INVALID_ARGS", `MCP tool "${toolName}" got invalid arguments`, {
+            hint: `fix these and retry: ${check.errors.slice(0, 5).join("; ")}`,
+            details: { tool: toolName, errors: check.errors },
+          });
+        }
+      }
+    }
     const result = (await this.rpc("tools/call", { name: toolName, arguments: args })) as {
       content?: Array<{ type: string; text?: string }>;
       isError?: boolean;
@@ -316,6 +395,13 @@ class StdioMcpServer implements McpServerHandle {
   }
 
   async shutdown(): Promise<void> {
+    // Set first: the 'exit' handler must not treat our own kill as a crash and
+    // schedule a respawn of the server we are shutting down.
+    this.closing = true;
+    if (this.respawnTimer) {
+      clearTimeout(this.respawnTimer);
+      this.respawnTimer = null;
+    }
     const proc = this.proc;
     const pid = proc?.pid;
     this.proc = null;

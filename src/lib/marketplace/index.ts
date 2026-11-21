@@ -22,6 +22,16 @@ export interface MarketplaceItem {
   engine?: string;
   path: string;
   sha256: string;
+  /**
+   * Digest construction used for `sha256`.
+   *   "v1" (absent) — sha256 of `${name}\n${content}` joined by "\n". Ambiguous:
+   *        a file whose content contains a name-shaped line can shift the
+   *        boundary between two files without changing the digest.
+   *   "v2" — sha256 over per-file sha256 of `name + NUL + content`, joined by
+   *        "\n". Length-free but unambiguous: the NUL cannot occur in a file
+   *        name, so the split point is always well defined.
+   */
+  digest?: "v1" | "v2";
   size?: number;
   tags?: string[];
   auth?: "oauth" | "token" | "none";
@@ -33,8 +43,25 @@ export interface MarketplaceIndex {
   generatedAt: string;
   minAppVersion?: string | null;
   items: MarketplaceItem[];
+  /** Monotonic publish counter — a replayed older index has a lower seq. */
+  seq?: number;
+  /** ISO timestamp after which this index must not be trusted. */
+  expiresAt?: string | null;
+  /** Item ids withdrawn by the publisher; filtered out even if still listed. */
+  revoked?: string[];
+  /** Signing key id, so a rotation does not require a new app build. */
+  keyId?: string;
+  /** Additional verification keys, base64url SPKI DER, keyed by id. */
+  keys?: Array<{ keyId: string; publicKey: string }>;
   /** Base64url Ed25519 signature over canonicalJson(index without signature). */
   signature?: string | null;
+}
+
+/** Index schema versions this SDK understands. Anything newer is refused. */
+export const SUPPORTED_SCHEMA_VERSIONS: readonly number[] = [1, 2];
+
+export function isSupportedSchema(index: MarketplaceIndex): boolean {
+  return SUPPORTED_SCHEMA_VERSIONS.includes(index.schemaVersion);
 }
 
 export interface FetchIndexOptions {
@@ -186,12 +213,51 @@ export interface ResolveOptions {
 /** Filter an index down to what this app version can actually run. */
 export function resolveCatalog(index: MarketplaceIndex, options: ResolveOptions): MarketplaceItem[] {
   const kinds = options.kinds ? new Set(options.kinds) : null;
+  const revoked = new Set(index.revoked ?? []);
   return index.items.filter(
     (item) =>
+      !revoked.has(item.id) &&
       (!kinds || kinds.has(item.kind)) &&
       satisfiesRange(options.appVersion, item.engine) &&
       (!index.minAppVersion || satisfiesRange(options.appVersion, `>=${index.minAppVersion}`)),
   );
+}
+
+/**
+ * Everything that must be true before an index is usable.
+ *
+ * Signature alone is not enough: a validly signed old index can be replayed to
+ * pin installs to a content set the publisher has since replaced or withdrawn
+ * (an item with a known-bad MCP server, say). `seq` and `expiresAt` are the
+ * publisher's way of saying "this is no longer current"; both are optional so
+ * schemaVersion 1 indexes keep working.
+ */
+export interface IndexVerdict {
+  ok: boolean;
+  reason?: "schema" | "expired" | "signature" | "missing-key";
+}
+
+export function checkIndex(
+  index: MarketplaceIndex,
+  options: { publicKey?: string | null; now?: () => number } = {},
+): IndexVerdict {
+  if (!isSupportedSchema(index)) return { ok: false, reason: "schema" };
+  if (index.expiresAt) {
+    const at = Date.parse(index.expiresAt);
+    const now = options.now ? options.now() : Date.now();
+    if (Number.isFinite(at) && at < now) return { ok: false, reason: "expired" };
+  }
+  if (!options.publicKey) return { ok: false, reason: "missing-key" };
+  // Rotation: prefer the key named by keyId when the index carries a keyring,
+  // and fall back to the pinned host key so a v1 index still verifies.
+  const candidates: string[] = [];
+  if (index.keys?.length) {
+    const named = index.keyId ? index.keys.find((k) => k.keyId === index.keyId) : undefined;
+    if (named) candidates.push(named.publicKey);
+    else candidates.push(...index.keys.map((k) => k.publicKey));
+  }
+  candidates.push(options.publicKey);
+  return candidates.some((key) => verifyIndex(index, key)) ? { ok: true } : { ok: false, reason: "signature" };
 }
 
 /* --------------------------------- cache --------------------------------- */
@@ -258,8 +324,11 @@ export async function loadCatalog(options: LoadCatalogOptions): Promise<LoadCata
   const ttlMs = options.ttlMs ?? 12 * 60 * 60 * 1000;
   const cached = options.cache ? await options.cache.read() : null;
   const fresh = cached && now() - cached.fetchedAt < ttlMs;
+  // One predicate for every source: schema, expiry, signature. A cache entry
+  // that has since expired falls through to the network instead of being
+  // served because it was once good.
   const check = (index: MarketplaceIndex) =>
-    options.publicKey ? verifyIndex(index, options.publicKey) : false;
+    checkIndex(index, { publicKey: options.publicKey, now }).ok;
 
   if (fresh && check(cached!.index)) {
     return { items: resolveCatalog(cached!.index, options), source: "cache", verified: true };
@@ -318,6 +387,26 @@ export async function loadCatalog(options: LoadCatalogOptions): Promise<LoadCata
 export function verifyItemFiles(item: MarketplaceItem, files: Record<string, string>): boolean {
   const names = Object.keys(files).sort();
   if (!names.length) return false;
-  const digest = sha256Hex(names.map((n) => `${n}\n${files[n]}`).join("\n"));
-  return digest === item.sha256;
+  return itemDigest(files, item.digest ?? "v1") === item.sha256;
+}
+
+/**
+ * The two digest constructors, kept side by side so the marketplace's
+ * build-index.mjs can be diffed against this file line for line.
+ *
+ * v1 is ambiguous by construction: joining `name + "\n" + content` with "\n"
+ * means a file whose CONTENT looks like `other.txt\n…` produces the same byte
+ * stream as a genuine two-file tree. Anyone able to publish an item could
+ * therefore ship different bytes under a digest that still verifies.
+ *
+ * v2 removes the ambiguity: each file contributes sha256(name ‖ NUL ‖ content)
+ * (a NUL cannot appear in a path), and those fixed-width hex digests are
+ * joined. No separator inside the hashed input is attacker-influenced.
+ */
+export function itemDigest(files: Record<string, string>, version: "v1" | "v2" = "v2"): string {
+  const names = Object.keys(files).sort();
+  if (version === "v1") {
+    return sha256Hex(names.map((n) => `${n}\n${files[n]}`).join("\n"));
+  }
+  return sha256Hex(names.map((n) => sha256Hex(`${n}\u0000${files[n]}`)).join("\n"));
 }

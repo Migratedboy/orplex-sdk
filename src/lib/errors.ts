@@ -29,12 +29,15 @@ export interface SdkErrorInfo {
   /** What the caller/model should do about it, in one clause. */
   hint?: string;
   cause?: unknown;
+  /** Structured context (failed field names, server id…) for logs and tests. */
+  details?: Record<string, unknown>;
 }
 
 export class SdkError extends Error {
   readonly code: SdkErrorCode;
   readonly retryable: boolean;
   readonly hint?: string;
+  readonly details?: Record<string, unknown>;
 
   constructor(code: SdkErrorCode, message: string, info: Omit<SdkErrorInfo, "code"> = {}) {
     super(message, info.cause === undefined ? undefined : { cause: info.cause });
@@ -42,6 +45,7 @@ export class SdkError extends Error {
     this.code = code;
     this.retryable = RETRYABLE.has(code);
     this.hint = info.hint;
+    this.details = info.details;
   }
 
   /** One line for a tool_result: message plus the actionable hint. */
