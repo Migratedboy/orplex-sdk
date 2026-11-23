@@ -47,6 +47,6 @@ jobs:
 
       - name: publish
         if: ${{ github.event_name == 'push' || inputs.dry_run == false }}
-        run: npm publish --provenance --access public
+        run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
