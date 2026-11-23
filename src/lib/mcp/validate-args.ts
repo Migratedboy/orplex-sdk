@@ -73,10 +73,17 @@ export function validateValue(value: unknown, schema: JsonSchema, path = ""): st
       errors.push(`${at}: longer than maxLength ${schema.maxLength}`);
     }
     if (typeof schema.pattern === "string") {
-      try {
-        if (!new RegExp(schema.pattern).test(value)) errors.push(`${at}: does not match pattern ${schema.pattern}`);
-      } catch {
-        /* an unparseable pattern is the server's bug, not the caller's */
+      // Guard against ReDoS: cap pattern/value sizes and reject nested-quantifier
+      // shapes that are the usual catastrophic-backtracking triggers.
+      const pattern = schema.pattern;
+      if (pattern.length > 500 || value.length > 10000 || /\\([^)]*[+*][^)]*\\)[+*{]/.test(pattern)) {
+        /* treat as "no constraint" rather than hanging the agent loop */
+      } else {
+        try {
+          if (!new RegExp(pattern).test(value)) errors.push(`${at}: does not match pattern ${pattern}`);
+        } catch {
+          /* an unparseable pattern is the server's bug, not the caller's */
+        }
       }
     }
   }

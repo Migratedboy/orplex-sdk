@@ -23,7 +23,12 @@ const manifest: PluginManifest = {
  * — is not traversal; testing the whole string for ".." blocked it.)
  */
 export function isEscapingPath(filePath: string): boolean {
-  const normalized = filePath.replace(/\\/g, "/");
+  let normalized = filePath.replace(/\\/g, "/");
+  try {
+    normalized = decodeURIComponent(normalized);
+  } catch {
+    /* keep raw on decode failure */
+  }
   if (normalized.startsWith("/")) return true;           // POSIX absolute
   if (/^[a-zA-Z]:\//.test(normalized)) return true;       // C:/...
   if (normalized.startsWith("//")) return true;          // //server/share

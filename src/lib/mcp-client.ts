@@ -163,6 +163,11 @@ class StdioMcpServer implements McpServerHandle {
     // is inert in both real spawn modes; `$(…)`, bare `$`, `%VAR%`, and
     // backticks are still refused.
     const varTemplate = /\$\{[A-Za-z_][A-Za-z0-9_]*\}/g;
+    if (typeof cfg.command !== "string" || cfg.command.length === 0 || cfg.command.length > 2048 || /[";&|$`()\n\r<>^%!]/.test(cfg.command.replace(varTemplate, ""))) {
+      throw new Error(
+        `MCP server "${this.server}" has an unsafe stored command — re-save the connector to pass the safety check`
+      );
+    }
     for (const a of cfg.args ?? []) {
       if (typeof a !== "string" || a.length > 2048 || /[";&|$`()\n\r<>^%!]/.test(a.replace(varTemplate, ""))) {
         throw new Error(

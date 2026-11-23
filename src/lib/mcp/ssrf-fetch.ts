@@ -37,7 +37,7 @@ const PRIVATE_HOST_PATTERNS: RegExp[] = [
 /** 127.0.0.0/8 in any dotted form plus localhost and [::1]. */
 export function isLoopbackHost(host: string): boolean {
   const h = host.toLowerCase();
-  if (h === "localhost" || h === "::1" || h === "0.0.0.0") return true;
+  if (h === "localhost" || h === "::1") return true;
   return /^127(\.\d{1,3}){3}$/.test(h);
 }
 
@@ -99,11 +99,29 @@ export function createSsrfFetch(
 ): SsrfFetch {
   const fetchImpl = base ?? (typeof globalThis.fetch === "function" ? globalThis.fetch.bind(globalThis) : undefined);
   return async (input, init) => {
-    const url = requestUrl(input);
-    const verdict = checkMcpUrl(url);
-    if (!verdict.allowed) throw new McpSsrfError(url, verdict.reason ?? "blocked");
-    if (!fetchImpl) throw new McpSsrfError(url, "no fetch implementation available");
-    return fetchImpl(input as string | URL, init);
+    if (!fetchImpl) throw new McpSsrfError(requestUrl(input), "no fetch implementation available");
+    // Follow redirects manually so every hop is re-screened against the SSRF
+    // policy (mirrors electron/mcp-bridge.ts). `redirect: "follow"` would let a
+    // public https URL that 302s to a private/metadata host bypass the check.
+    let current = requestUrl(input);
+    const mergedInit = { ...(init ?? {}) };
+    let res: Response | null = null;
+    for (let hop = 0; hop < 5; hop++) {
+      const verdict = checkMcpUrl(current);
+      if (!verdict.allowed) throw new McpSsrfError(current, verdict.reason ?? "blocked");
+      res = await fetchImpl(current, { ...mergedInit, redirect: "manual" });
+      if (res.status < 300 || res.status > 399) break;
+      const loc = res.headers.get("location");
+      if (!loc) break;
+      let next: string;
+      try {
+        next = new URL(loc, current).toString();
+      } catch {
+        break;
+      }
+      current = next;
+    }
+    return res as Response;
   };
 }
 

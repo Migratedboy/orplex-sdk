@@ -140,9 +140,12 @@ export function safeEntryName(raw: string): string | null {
  * after the original upload where we can recover it.
  */
 export function defaultDest(archivePath: string, originalName?: string): string {
-  const stem =
+  const rawStem =
     (originalName && originalName.replace(/\.[^.]+$/, "")) ||
     (archivePath.split("/").pop() || "archive").replace(/\.[^.]+$/, "");
+  // Keep the stem to a single path segment so a crafted name cannot nest or
+  // escape the workspace through the default destination.
+  const stem = rawStem.replace(/[\\/]/g, "_").replace(/\.\./g, "_");
   // Never default into our own state dir.
   if (/(^|\/)\.orplex\/attachments\//.test(archivePath)) return stem;
   const slash = archivePath.lastIndexOf("/");

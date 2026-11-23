@@ -123,8 +123,14 @@ export function buildChildEnv(
 
   // The manifest's own variables always win — they are the reason this child
   // exists, and the host has already decrypted them for this server only.
+  // Manifest vars are the server's own declared credentials, so the broad
+  // secret-name filter (which is for HOST variables) does not apply. Only
+  // process-critical keys that must never be redirected by a manifest are
+  // refused here.
+  const MANIFEST_BLOCKED = new Set(["NODE_OPTIONS", "PATH", "Path", "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES"]);
   for (const [name, value] of Object.entries(cfg.env ?? {})) {
     if (typeof value !== "string") continue;
+    if (MANIFEST_BLOCKED.has(name.toUpperCase())) continue;
     env[name] = value;
   }
 

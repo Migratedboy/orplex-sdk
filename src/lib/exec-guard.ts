@@ -390,6 +390,11 @@ export function isCommandAllowed(
     return { allowed: false, reason: "control characters are not permitted in commands" };
   }
 
+  // cmd.exe metacharacters that can bypass the heuristic screen.
+  if (/\^/.test(command) || /%[A-Za-z_][A-Za-z0-9_]*%/.test(command)) {
+    return { allowed: false, reason: "cmd.exe metacharacters (^ or %VAR%) are not permitted" };
+  }
+
   // Command substitution is allowed, but its CONTENTS are screened too — a
   // hidden payload inside $() is exactly what the old ban was protecting
   // against, so the ban moves from "any $()" to "a dangerous $()".
