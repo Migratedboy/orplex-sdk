@@ -4,7 +4,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-const ROOT = "D:/orplex-sdk/dist/esm";
+const ROOT = path.resolve(process.cwd(), "dist", "esm");
 
 function walk(dir, out = []) {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
