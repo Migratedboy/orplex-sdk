@@ -32,7 +32,7 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
       - run: node scripts/verify-exports.mjs
-      - run: node --test tests/
+      - run: node --test "tests/**/*.test.mjs"
 
       - name: version matches the tag
         shell: bash

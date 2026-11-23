@@ -2,17 +2,19 @@
 // number of times, and must not be resurrected by a shutdown we initiated.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
 const client = await import("../dist/esm/lib/mcp-client.js");
 const { configureAgentRuntime, resetAgentRuntimeConfig } = await import("../dist/esm/lib/runtime-config.js");
 
-// The MCP arg gate refuses shell metacharacters, and this machine's %TEMP%
-// path contains "!" (C:\Users\Hey!\…), so a fixture under %TEMP% is rejected
-// before it reaches the spawn — not the behaviour under test here.
-const base = process.platform === "win32" ? "D:/tmp" : tmpdir();
+// The MCP arg gate refuses shell metacharacters, and some hosts' temp paths
+// contain "!" (e.g. C:\Users\Hey!\…), so a fixture under the OS temp dir is
+// rejected before it reaches the spawn — not the behaviour under test here.
+// Use a stable directory under the repo root to keep the path clean everywhere.
+const base = path.join(process.cwd(), ".tmp-tests");
+mkdirSync(base, { recursive: true });
 const dir = mkdtempSync(path.join(base, "orplex-respawn-"));
 
 /** A grossly minimal MCP server: answers tools/list, then exits N ms later. */

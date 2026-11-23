@@ -86,7 +86,7 @@
     "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
     "build": "npm run clean && tsc -p tsconfig.esm.json && tsc -p tsconfig.cjs.json && node scripts/fix-esm.mjs && node scripts/write-pkg-markers.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node scripts/verify-exports.mjs && node --test tests/",
+    "test": "node scripts/verify-exports.mjs && node --test \"tests/**/*.test.mjs\"",
     "prepublishOnly": "npm run ci",
     "ci": "npm run typecheck && npm run build && node scripts/verify-exports.mjs && node --test tests/"
   },
