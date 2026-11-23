@@ -1,6 +1,6 @@
 {
   "name": "@orplex/sdk",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Framework-free core of Orplex Code: AI tool layer, MCP gateway, skills, plugins, cloud client, signed marketplace resolver",
   "license": "MIT",
   "type": "module",
