@@ -47,7 +47,7 @@ jobs:
       - run: node scripts/verify-exports.mjs
 
       # 4. Contract tests run against dist/, i.e. the thing users install.
-      - run: node --test --test-concurrency=1 "tests/*.test.mjs"
+      - run: node --test --test-concurrency=1 tests/files.test.mjs tests/marketplace.test.mjs tests/marketplace-index-v2.test.mjs tests/mcp-args.test.mjs tests/mcp-env.test.mjs tests/mcp-lifecycle.test.mjs tests/mcp-respawn.test.mjs tests/mcp-routing.test.mjs tests/tools.test.mjs
 
       # 5. The tarball stays the size we promise, and contains what we claim.
       - name: pack budget

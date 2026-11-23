@@ -32,7 +32,7 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
       - run: node scripts/verify-exports.mjs
-      - run: node --test --test-concurrency=1 "tests/*.test.mjs"
+      - run: node --test --test-concurrency=1 tests/files.test.mjs tests/marketplace.test.mjs tests/marketplace-index-v2.test.mjs tests/mcp-args.test.mjs tests/mcp-env.test.mjs tests/mcp-lifecycle.test.mjs tests/mcp-respawn.test.mjs tests/mcp-routing.test.mjs tests/tools.test.mjs
 
       - name: version matches the tag
         shell: bash
