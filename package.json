@@ -88,7 +88,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node scripts/verify-exports.mjs && node --test --test-concurrency=1 tests/files.test.mjs tests/marketplace.test.mjs tests/marketplace-index-v2.test.mjs tests/mcp-args.test.mjs tests/mcp-env.test.mjs tests/mcp-lifecycle.test.mjs tests/mcp-respawn.test.mjs tests/mcp-routing.test.mjs tests/tools.test.mjs",
     "prepublishOnly": "npm run ci",
-    "ci": "npm run typecheck && npm run build && node scripts/verify-exports.mjs && node --test tests/"
+    "ci": "npm run typecheck && npm run build && node scripts/verify-exports.mjs && node --test --test-concurrency=1 tests/files.test.mjs tests/marketplace.test.mjs tests/marketplace-index-v2.test.mjs tests/mcp-args.test.mjs tests/mcp-env.test.mjs tests/mcp-lifecycle.test.mjs tests/mcp-respawn.test.mjs tests/mcp-routing.test.mjs tests/tools.test.mjs"
   },
   "dependencies": {
     "jszip": "^3.10.1",
