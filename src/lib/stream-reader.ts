@@ -1,7 +1,7 @@
 // stream-reader.ts — SSE stream reader for LLM responses
 // Handles both legacy XML tool calls and M3 native tool_calls + thinking content
 
-import { deduplicateWords as dedupeWords, dedupeStreamedChunk, parseToolCalls as parseXmlToolCalls, replaceLastStatus } from "./tool-text";
+import { deduplicateWords as dedupeWords, dedupeStreamedChunk, extractBareJsonToolCalls, parseToolCalls as parseXmlToolCalls, replaceLastStatus } from "./tool-text";
 import { apiFetch } from "./api-base";
 
 export { deduplicateWords, dedupeStreamedChunk, replaceLastStatus };
@@ -866,13 +866,23 @@ export async function readStream(
 
   // Also parse legacy XML tool calls from content (backward compat)
   const legacyToolCalls = parseToolCalls(streamedContent);
-  const allToolCalls = [...nativeToolCalls, ...legacyToolCalls];
+
+  // Third shape: some providers return NO tool_calls array and no XML — the
+  // call arrives as plain JSON in the content channel. Observed live:
+  //   {"cmd":"ls -la","cwd":"/workspace"} {"tool":"terminal","args":{...}}
+  // Unhandled, that JSON became the visible answer and the call never ran.
+  // Now it is recovered, normalized to a real tool name, and stripped from
+  // what the user sees.
+  const bare = nativeToolCalls.length === 0 && legacyToolCalls.length === 0
+    ? extractBareJsonToolCalls(streamedContent)
+    : { calls: [] as ToolCall[], cleaned: streamedContent };
+  const allToolCalls = [...nativeToolCalls, ...legacyToolCalls, ...bare.calls];
 
   // Kill provider-echoed reasoning before it enters any downstream path
   // (display, FORCE-TOOLS text check, apiMessages history) — the worker
   // appends the thinking channel and the content channel separately, so an
   // echoed copy inside content duplicated every deliberation paragraph.
-  const cleanedContent = stripEchoedThinking(streamedContent, thinkingContent);
+  const cleanedContent = stripEchoedThinking(bare.cleaned, thinkingContent);
 
   return { content: cleanedContent || null, thinking: thinkingContent, toolCalls: allToolCalls };
 }

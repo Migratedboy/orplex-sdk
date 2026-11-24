@@ -4,6 +4,26 @@ All notable changes to `@orplex/sdk`. Versions follow semver; `0.x` minors may
 add behaviour that existing hosts must opt into, and every such change is called
 out here.
 
+## 0.5.3 — 2026-11-24
+
+A tool call that arrives as JSON text now runs, and stops being printed.
+
+### Tool-call recovery
+
+- **Text-mode tool calls are understood.** Some (especially free) providers
+  return no `tool_calls` array and no `<tool_call>` XML: the call lands in the
+  content channel as plain JSON —
+  `{"cmd":"ls -la","cwd":"/workspace"} {"tool":"terminal","args":{...}}`.
+  Unhandled, that JSON was rendered as the assistant's answer and the call never
+  ran, so the agent then reported an empty workspace. `extractBareJsonToolCalls`
+  now recovers those objects (several per turn, balanced-brace scanning),
+  normalizes invented names (`terminal`, `bash`, `shell`, `execute_command`, …)
+  onto the roster's `run_command`, and returns the residue with the understood
+  spans removed so raw JSON never reaches the transcript.
+- The thin-prose gate is unchanged in spirit: a real answer that merely
+  contains JSON (a config snippet, an API response) is left byte-for-byte alone.
+- `parseBareJsonToolCalls` keeps its old signature and delegates.
+
 ## 0.5.2 — 2026-02-14
 
 A tool call can finally report that it finished.

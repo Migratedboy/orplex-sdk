@@ -268,84 +268,230 @@ function isBoundedArgValue(value: unknown, depth = 0): boolean {
   return false;
 }
 
+/**
+ * Tool names that free models invent for the ONE command tool we ship.
+ * Canonical roster name is `run_command`; the models write `terminal`,
+ * `bash`, `shell`, `run_terminal_cmd`, `execute_command`… Converting is the
+ * difference between "the agent works" and "the raw JSON becomes the answer".
+ */
+const COMMAND_TOOL_ALIASES = new Set([
+  "terminal",
+  "bash",
+  "shell",
+  "sh",
+  "cmd",
+  "run_terminal",
+  "run_terminal_cmd",
+  "run_shell",
+  "run_bash",
+  "execute_command",
+  "exec",
+  "run",
+]);
+
+/** Parameter names models use for the command string itself. */
+const COMMAND_PARAM_ALIASES = ["cmd", "command", "shell_command", "script", "input", "code"];
+
+/** Normalize a recovered call to `{ name, ...args }` with a real tool name. */
+function normalizeToolCall(rec: Record<string, unknown>): (Record<string, unknown> & { name: string }) | null {
+  // Shape A: { tool: "terminal", args: {...} } / { name, arguments }
+  const container = rec.args ?? rec.arguments ?? rec.parameters ?? rec.input;
+  if (typeof rec.tool === "string" || (typeof rec.name === "string" && isPlainObject(container))) {
+    const rawName = (typeof rec.name === "string" ? rec.name : rec.tool) as string;
+    if (!TOOL_CALL_NAME_RE.test(rawName)) return null;
+    const args = isPlainObject(container) ? (container as Record<string, unknown>) : {};
+    const merged: Record<string, unknown> = { ...args };
+    for (const [k, v] of Object.entries(rec)) {
+      if (["tool", "name", "args", "arguments", "parameters", "input"].includes(k)) continue;
+      merged[k] = v;
+    }
+    return withCanonicalName(rawName, merged);
+  }
+  // Shape B: { name: "read_file", path: "…" }
+  if (typeof rec.name === "string" && TOOL_CALL_NAME_RE.test(rec.name)) {
+    const { name, ...args } = rec;
+    return withCanonicalName(name as string, args as Record<string, unknown>);
+  }
+  // Shape C: a bare command object — { cmd: "ls -la", cwd: "/workspace" }.
+  // Only accepted when EVERY key is a command-tool parameter and one of them
+  // carries a string command; otherwise prose JSON would become an exec.
+  const keys = Object.keys(rec);
+  if (keys.length >= 1 && keys.length <= 5) {
+    const args: Record<string, unknown> = {};
+    let command: string | null = null;
+    for (const [k, v] of Object.entries(rec)) {
+      if (!["cmd", "command", "cwd", "timeout", "shell"].includes(k)) return null;
+      if ((k === "cmd" || k === "command") && typeof v === "string" && v.trim()) command = v;
+      args[k === "cmd" ? "command" : k] = v;
+    }
+    if (!command) return null;
+    return { name: "run_command", ...args, command };
+  }
+  return null;
+}
+
+function isPlainObject(v: unknown): boolean {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+
+/** Map an invented name + its args onto the roster's canonical name/params. */
+function withCanonicalName(name: string, args: Record<string, unknown>): Record<string, unknown> & { name: string } | null {
+  const lower = name.toLowerCase();
+  if (!COMMAND_TOOL_ALIASES.has(lower)) return { name, ...args } as Record<string, unknown> & { name: string };
+  const out: Record<string, unknown> = { name: "run_command" };
+  let command: string | null = null;
+  for (const [k, v] of Object.entries(args)) {
+    const key = k.toLowerCase();
+    if (COMMAND_PARAM_ALIASES.includes(key)) {
+      if (typeof v === "string" && v.trim()) command = v;
+      continue;
+    }
+    out[k === "cwd" ? "cwd" : k] = v;
+  }
+  if (!command) return null; // a command tool with no command is not a call
+  out.command = command;
+  return out as Record<string, unknown> & { name: string };
+}
+
 /** A tool-call-shaped object: string "name" matching tool-name shape, only
  *  bounded argument values, bounded key count. */
 function isToolCallShaped(obj: unknown): obj is Record<string, unknown> & { name: string } {
   if (!obj || typeof obj !== "object" || Array.isArray(obj)) return false;
   const rec = obj as Record<string, unknown>;
-  if (typeof rec.name !== "string" || !TOOL_CALL_NAME_RE.test(rec.name)) return false;
   const keys = Object.keys(rec);
   if (keys.length < 1 || keys.length > 20) return false;
   for (const [k, v] of Object.entries(rec)) {
-    if (k === "name") continue;
+    if (k === "name" || k === "tool" || k === "args" || k === "arguments" || k === "parameters" || k === "input") continue;
     if (!isBoundedArgValue(v)) return false;
   }
-  return true;
+  return normalizeToolCall(rec) !== null;
 }
 
-/** Extract tool-call-shaped JSON from a model turn that skipped the XML
- *  wrapper. Returns [] when the text is recognisably prose (thin-prose gate:
- *  the JSON must dominate the message). Never returns XML results twice —
- *  callers feed this only the residue after XML parsing. */
-export function parseBareJsonToolCalls(text: string): XmlToolCall[] {
-  if (!text || !text.includes('"')) return [];
+/**
+ * Every balanced `{…}` span in the text, in order. A model that emits two
+ * calls in one turn writes them back to back (`{...} {...}`) — the old
+ * first-brace-to-last-brace span is then invalid JSON and EVERY call was
+ * dropped, so the raw objects were printed as the answer instead.
+ */
+function balancedObjectSpans(text: string): Array<{ text: string; start: number; end: number }> {
+  const spans: Array<{ text: string; start: number; end: number }> = [];
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') { inString = true; continue; }
+    if (ch === "{") {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (ch === "}") {
+      if (depth > 0) {
+        depth--;
+        if (depth === 0 && start >= 0) spans.push({ text: text.slice(start, i + 1), start, end: i + 1 });
+      }
+    }
+  }
+  return spans;
+}
+
+/**
+ * Extract tool-call-shaped JSON from a model turn that skipped the XML
+ * wrapper, and REMOVE the spans that were understood.
+ *
+ * Returns the calls plus the residue a user should actually see: raw
+ * `{"tool":"terminal","args":{...}}` in the answer bubble is a bug report, not
+ * an answer (live-observed: the transcript showed the JSON instead of the
+ * result of listing files).
+ *
+ * Never returns XML results twice — callers feed this only the residue after
+ * XML parsing.
+ */
+export function extractBareJsonToolCalls(text: string): { calls: XmlToolCall[]; cleaned: string } {
+  const empty = { calls: [] as XmlToolCall[], cleaned: text };
+  if (!text || !text.includes('"')) return empty;
+
   const trimmed = text.trim();
   // XML-wrapped spans belong to the XML parser (even if its JSON was
-  // malformed) and fences are extracted separately — mask both so raw-span
-  // extraction and the prose gate only see genuine bare-JSON residue.
-  const masked = trimmed
-    .replace(/<tool_call>[\s\S]*?<\/tool_call>/g, " ")
-    .replace(/```[\s\S]*?```/g, " ");
-  const candidates: string[] = [];
-  // 1. json-fenced block(s) — from the unmasked text
+  // malformed) and fenced blocks are scanned separately — mask both so the raw
+  // scan and the prose gate only see genuine bare-JSON residue.
+  const maskedForScan = trimmed
+    .replace(/<tool_call>[\s\S]*?<\/tool_call>/g, (m) => " ".repeat(m.length))
+    .replace(/```[\s\S]*?```/g, (m) => " ".repeat(m.length));
+
+  type Hit = { call: XmlToolCall; start: number; end: number };
+  const hits: Hit[] = [];
+
+  // 1. json-fenced block(s) — parsed from the ORIGINAL text
   const fenceRe = /```(?:json)?\s*\n([\s\S]*?)```/g;
   let m: RegExpExecArray | null;
   while ((m = fenceRe.exec(trimmed)) !== null) {
     const body = m[1].trim();
-    if (body.includes('"')) candidates.push(body);
+    if (!body.includes('"')) continue;
+    const bodyStart = m.index + m[0].indexOf(body);
+    for (const span of balancedObjectSpans(body)) {
+      const parsed = parseOneCall(span.text);
+      if (parsed) hits.push({ call: parsed, start: bodyStart + span.start, end: bodyStart + span.end });
+    }
   }
-  // 2. raw {...} and [...] spans from the masked text. The brace span of an
-  //    array is mangled ("{...},{...}"), so prefer the bracket span when the
-  //    text starts with one; duplicates are dropped after parsing.
-  const braceStart = masked.indexOf("{");
-  const bracketStart = masked.indexOf("[");
-  if (bracketStart >= 0 && (braceStart < 0 || bracketStart < braceStart)) {
-    const bracketEnd = masked.lastIndexOf("]");
-    if (bracketEnd > bracketStart) candidates.push(masked.slice(bracketStart, bracketEnd + 1));
+
+  // 2. bare objects anywhere in the residue — every balanced span, in order
+  for (const span of balancedObjectSpans(maskedForScan)) {
+    const parsed = parseOneCall(span.text);
+    if (parsed) hits.push({ call: parsed, start: span.start, end: span.end });
   }
-  if (braceStart >= 0) {
-    const braceEnd = masked.lastIndexOf("}");
-    if (braceEnd > braceStart) candidates.push(masked.slice(braceStart, braceEnd + 1));
+
+  if (hits.length === 0) return empty;
+  if (hits.length > 8) return empty; // not a tool turn, something runaway
+
+  // Thin-prose gate: with every understood span removed, at most 2 short lines
+  // of chatter may remain ("Reading the file:"). A real answer paragraph means
+  // the JSON was data, not a call, and is left alone.
+  let cleaned = trimmed;
+  for (let i = hits.length - 1; i >= 0; i--) {
+    const h = hits[i];
+    cleaned = cleaned.slice(0, h.start) + cleaned.slice(h.end);
   }
-  const parsed: XmlToolCall[] = [];
+  const outsideLines = cleaned.replace(/[ \t]+/g, " ").split("\n").filter((l) => l.trim().length > 0);
+  if (outsideLines.length > 2 || outsideLines.some((l) => l.length > 120)) return empty;
+
   const seen = new Set<string>();
-  for (const c of candidates) {
-    let obj: unknown;
-    try {
-      obj = JSON.parse(c);
-    } catch {
-      continue;
-    }
-    const list = Array.isArray(obj) ? obj : [obj];
-    if (list.length === 0 || list.length > 8) continue;
-    if (!list.every(isToolCallShaped)) continue;
-    // Thin-prose gate: outside the JSON there may be at most 2 short lines of
-    // chatter (e.g. "Reading the file:"), never a real answer paragraph.
-    const outside = masked
-      .replace(/\{[\s\S]*\}/, " ")
-      .replace(/\[[\s\S]*\]/, " ")
-      .trim();
-    const outsideLines = outside.split("\n").filter((l) => l.trim().length > 0);
-    if (outsideLines.length > 2 || outsideLines.some((l) => l.length > 120)) continue;
-    for (const call of list) {
-      const key = JSON.stringify(call);
-      if (!seen.has(key)) {
-        seen.add(key);
-        parsed.push(call as XmlToolCall);
-      }
+  const calls: XmlToolCall[] = [];
+  for (const h of hits) {
+    const key = JSON.stringify(h.call);
+    if (!seen.has(key)) {
+      seen.add(key);
+      calls.push(h.call);
     }
   }
-  return parsed;
+  return { calls, cleaned: cleaned.trim() };
+}
+
+/** Parse one balanced JSON object into a normalized tool call, or null. */
+function parseOneCall(raw: string): XmlToolCall | null {
+  let obj: unknown;
+  try {
+    obj = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  const list = Array.isArray(obj) ? obj : [obj];
+  if (list.length === 0 || list.length > 8) return null;
+  const normalized = list.map((o) => (isToolCallShaped(o) ? normalizeToolCall(o as Record<string, unknown>) : null));
+  if (normalized.some((n) => n === null)) return null;
+  const first = normalized[0] as Record<string, unknown> & { name: string };
+  return first as unknown as XmlToolCall;
+}
+
+/** Back-compat single-call view used by the loop engine's recovery hook. */
+export function parseBareJsonToolCalls(text: string): XmlToolCall[] {
+  return extractBareJsonToolCalls(text).calls;
 }
 
 // === Status-line replacement (agent display transcript) ===
