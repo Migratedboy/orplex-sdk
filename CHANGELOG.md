@@ -4,6 +4,37 @@ All notable changes to `@orplex/sdk`. Versions follow semver; `0.x` minors may
 add behaviour that existing hosts must opt into, and every such change is called
 out here.
 
+## 0.5.2 — 2026-02-14
+
+A tool call can finally report that it finished.
+
+### Activity / live tool calls
+
+- **The lifecycle has a terminal state.** `StatusLiveToolCall.status` was
+  `"running" | "dismissed"` — there was no way to say "this call is done", so a
+  live row could not settle and the only way to stop a spinner was to delete the
+  row at the moment the tool STARTED executing. That is why tool calls appeared
+  all at once, already complete, instead of pending → running → done. The status
+  union is now `"pending" | "running" | "done" | "error" | "dismissed"`, with
+  `endedAt` and `output` alongside it. Existing consumers keep working: the extra
+  values are additional strings, and an unknown status falls back to the previous
+  behaviour.
+- **`appendLiveToolSteps` updates a row in place.** It used to `continue` past
+  any call id it had already seen, so the emitter's later `done` for that id was
+  discarded and the row stayed `live` forever. It now applies status, `endedAt`
+  and the result body to the existing step, and returns the SAME array when
+  nothing changed (no needless rerender).
+- **A settled row shows its result, not its arguments.** The initial body was
+  always `JSON.stringify(args)`; a call that arrives with `output` now uses it.
+- **`StepStatus` gains `pending`** — the model has named the tool while its
+  arguments are still streaming, which is not the same as executing.
+- **Start times are honest and bounded.** The first start wins across the
+  lifecycle (a provider retry must not reset a running timer), and terminal
+  states release the entry in the start-time map — previously only `dismissed`
+  did, so every finished call leaked an entry for the life of the page.
+- Tests: `tests/activity-lifecycle.test.mjs`, now part of `npm test` and both CI
+  workflows.
+
 ## 0.5.0 — 2026-11-21
 
 Closes the loop on the four knobs 0.4.0 shipped but did not wire, and closes the
