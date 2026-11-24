@@ -434,10 +434,11 @@ export function extractBareJsonToolCalls(text: string): { calls: XmlToolCall[]; 
   while ((m = fenceRe.exec(trimmed)) !== null) {
     const body = m[1].trim();
     if (!body.includes('"')) continue;
-    const bodyStart = m.index + m[0].indexOf(body);
     for (const span of balancedObjectSpans(body)) {
       const parsed = parseOneCall(span.text);
-      if (parsed) hits.push({ call: parsed, start: bodyStart + span.start, end: bodyStart + span.end });
+      // Remove the whole fenced block, not just the JSON span, so the prose
+      // gate doesn't see the fence lines ("```json", "```") as chatter.
+      if (parsed) hits.push({ call: parsed, start: m.index, end: m.index + m[0].length });
     }
   }
 
