@@ -34,27 +34,56 @@ export type StatusCompaction = {
   summary?: string;
 };
 
+/**
+ * Lifecycle of one tool call. A UI row is expected to exist from `pending`
+ * through the terminal state, and to be REMOVED only on `dismissed` (which
+ * means "the parsed transcript owns this row now").
+ *
+ * `running | dismissed` was the original pair, and it was not enough to draw a
+ * call: there was no way to say "this finished", so a live row could not settle
+ * and the only way to stop a spinner was to delete the row at the moment the
+ * tool STARTED executing. That is what made tool calls appear all at once, in
+ * their final state. The two extra terminal states and the timestamps below are
+ * what a row needs to animate pending → running → done.
+ */
+export type ToolLifecycleStatus = "pending" | "running" | "done" | "error" | "dismissed";
+
 export type StatusLiveToolCall = {
   type: "live-tool-call";
   taskId: string;
   id: string;
   tool: string;
   args: Record<string, unknown>;
-  status: "running" | "dismissed";
+  status: ToolLifecycleStatus;
+  /** Epoch ms — when the call began (set on `pending`/`running`). */
   startedAt?: number;
+  /** Epoch ms — when it settled (set on `done`/`error`). */
+  endedAt?: number;
+  /** Result text for the row's expandable body (`done`). */
+  output?: string;
 };
 
 export type StatusMessage = StatusEvent | StatusCompaction | StatusLiveToolCall;
 
 const liveToolStartedAt = new Map<string, number>();
 
-export function emitLiveToolCall(event: Omit<StatusLiveToolCall, "type" | "startedAt"> & { startedAt?: number }) {
-  const startedAt = event.status === "running"
+/** Statuses after which a call will never report again. */
+const TERMINAL_LIFECYCLE = new Set<ToolLifecycleStatus>(["done", "error", "dismissed"]);
+
+export function emitLiveToolCall(
+  event: Omit<StatusLiveToolCall, "type" | "startedAt"> & { startedAt?: number; endedAt?: number }
+) {
+  const reusable = event.status === "pending" || event.status === "running";
+  // The FIRST start wins: a provider retry re-announces the same call and must
+  // not reset a timer the user is already watching.
+  const startedAt = reusable
     ? liveToolStartedAt.get(event.id) ?? event.startedAt ?? Date.now()
-    : event.startedAt;
-  if (event.status === "running" && startedAt) liveToolStartedAt.set(event.id, startedAt);
+    : event.startedAt ?? liveToolStartedAt.get(event.id);
+  if (reusable && startedAt) liveToolStartedAt.set(event.id, startedAt);
   emitStatus({ type: "live-tool-call", ...event, ...(startedAt ? { startedAt } : {}) });
-  if (event.status === "dismissed") liveToolStartedAt.delete(event.id);
+  // Terminal states release the map entry. `dismissed` used to be the only
+  // cleanup, so every finished call leaked an entry for the life of the page.
+  if (TERMINAL_LIFECYCLE.has(event.status)) liveToolStartedAt.delete(event.id);
 }
 
 /**

@@ -12,7 +12,12 @@ export type StepKind =
   | "mcp"
   | "other";
 
-export type StepStatus = "live" | "done" | "error" | "approval";
+/**
+ * `pending` = the model has named the tool, its arguments are still streaming.
+ * Distinct from `live` (= executing) so a row can be painted before the call
+ * starts and never claim work that has not begun.
+ */
+export type StepStatus = "pending" | "live" | "done" | "error" | "approval";
 
 export interface ActivityStep {
   id: string;
@@ -439,9 +444,38 @@ export function activitySummary(steps: ActivityStep[]): string {
   return `${parts.slice(0, 5).join(", ")}${parts.length > 5 ? ", …" : ""}`;
 }
 
+/**
+ * A live call as the emitter reports it. `status`/`endedAt`/`output` are the
+ * lifecycle; older callers pass only the first four fields and keep the
+ * historical behaviour (a `live` row that is added once).
+ */
+export type LiveToolCallInput = {
+  id: string;
+  tool: string;
+  args: Record<string, unknown>;
+  startedAt?: number;
+  status?: "pending" | "running" | "done" | "error";
+  endedAt?: number;
+  output?: string;
+};
+
+/** The row's step status for a call status. */
+function stepStatusFor(status: LiveToolCallInput["status"]): StepStatus {
+  switch (status) {
+    case "pending":
+      return "pending";
+    case "done":
+      return "done";
+    case "error":
+      return "error";
+    default:
+      return "live";
+  }
+}
+
 export function appendLiveToolSteps(
   segments: ContentSegment[],
-  calls: Array<{ id: string; tool: string; args: Record<string, unknown>; startedAt?: number }>,
+  calls: LiveToolCallInput[],
   startedAt: number
 ): ContentSegment[] {
   if (calls.length === 0) return segments;
@@ -452,24 +486,52 @@ export function appendLiveToolSteps(
     group = { id: `activity-${next.filter((s) => s.type === "activity").length}`, steps: [], startedAt };
     next.push({ type: "activity", content: "", activity: group });
   }
-  const existing = new Set(group.steps.map((step) => step.id));
+  const index = new Map(group.steps.map((step, i) => [step.id, i]));
   const steps = [...group.steps];
+  let changed = false;
   for (const call of calls) {
-    if (existing.has(call.id)) continue;
-    const label = toolTitle(call.tool);
-    const chip = chipFromArgs(call.args, label.kind);
-    steps.push({
-      id: call.id,
-      kind: label.kind,
-      tool: call.tool,
-      title: label.title,
-      chip,
-      body: capped(JSON.stringify(call.args, null, 2)),
-      status: "live",
-      startedAt: call.startedAt || startedAt,
-    });
-    existing.add(call.id);
+    const at = index.get(call.id);
+    if (at === undefined) {
+      const label = toolTitle(call.tool);
+      const chip = chipFromArgs(call.args, label.kind);
+      steps.push({
+        id: call.id,
+        kind: label.kind,
+        tool: call.tool,
+        title: label.title,
+        chip,
+        // A settled call shows its RESULT, not its arguments: the arguments are
+        // already represented by the chip/target on the row.
+        body: capped(call.output ?? JSON.stringify(call.args, null, 2)),
+        status: stepStatusFor(call.status),
+        startedAt: call.startedAt || startedAt,
+        ...(call.endedAt ? { endedAt: call.endedAt } : {}),
+      });
+      index.set(call.id, steps.length - 1);
+      changed = true;
+      continue;
+    }
+    // The row already exists: UPDATE it. Skipping it (the old `continue`) is
+    // why a live row could never settle — the emitter's later `done` for the
+    // same id was silently dropped and the row stayed `live` forever.
+    const step = steps[at];
+    const status = call.status ? stepStatusFor(call.status) : step.status;
+    const endedAt = call.endedAt ?? step.endedAt;
+    const body = call.output ?? step.body;
+    const chip = Object.keys(call.args ?? {}).length > 0 ? chipFromArgs(call.args, step.kind) : step.chip;
+    if (status === step.status && endedAt === step.endedAt && body === step.body && chip === step.chip) {
+      continue;
+    }
+    steps[at] = {
+      ...step,
+      status,
+      ...(endedAt ? { endedAt } : {}),
+      ...(body ? { body } : {}),
+      ...(chip ? { chip } : {}),
+    };
+    changed = true;
   }
+  if (!changed) return segments;
   const updated = { ...group, steps };
   next[next.length - 1] = { type: "activity", content: "", activity: updated };
   return next;
