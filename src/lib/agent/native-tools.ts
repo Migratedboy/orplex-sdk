@@ -75,6 +75,18 @@ export interface ToolContext {
   fs: FileOpsFs;
   counters: FileOpsCounters;
   fileTree: any[];
+  /**
+   * Live directory listing from THE USER'S DISK (workspace-relative path in,
+   * entry names out; null when the host has no disk route).
+   *
+   * The in-memory `fileTree` is a snapshot taken when the folder was opened. It
+   * can be stale (a folder opened in a previous session) or empty (the handle
+   * was dropped by a reload) — and both states look identical to "this project
+   * has no files". Live-observed: the agent explored `.orplex` and reported the
+   * user's project as empty while their selected folder sat on disk with real
+   * files. When this hook exists, disk wins over the snapshot.
+   */
+  listDir?: (relPath: string) => Promise<string[] | null>;
   /** Cached workspace file contents — the search_code index */
   fileContents: Record<string, string>;
 
@@ -357,7 +369,26 @@ export async function dispatchToolCall(
     ctx.appendDisplay(`analysing [${call.path || "."}]\n`);
     ctx.syncDisplay();
 
-        const listing = listFilesUnderPath(call.path || "", ctx.fileTree);
+        let listing = listFilesUnderPath(call.path || "", ctx.fileTree);
+        // Disk fallback: an empty/stale tree must not be reported as an empty
+        // project. Only consulted when the snapshot yields nothing for the
+        // requested path, so the fast path (a warm tree) is unchanged.
+        const snapshotEmpty = listing.trim() === "No files found at that path.";
+        if (snapshotEmpty && ctx.listDir) {
+          try {
+            const entries = await ctx.listDir(call.path || "");
+            if (entries && entries.length > 0) {
+              // Directories first, then files — the same shape the tree walker
+              // produces, so downstream formatting does not change.
+              const dirs = entries.filter((e) => e.endsWith("/"));
+              const files = entries.filter((e) => !e.endsWith("/"));
+              listing = [...dirs, ...files].join("\n");
+              ctx.replaceStatus?.(`[SUCCESS] Listed ${entries.length} entr${entries.length === 1 ? "y" : "ies"} on disk in \`${call.path || "."}\``);
+            }
+          } catch {
+            // A host without a disk route keeps the tree result — never throw.
+          }
+        }
         // The empty sentinel is a single line, so splitting it yielded
         // fileCount === 1 and the status chip read
         // "[SUCCESS] Listed 1 file(s)" for a COMPLETELY empty workspace. That

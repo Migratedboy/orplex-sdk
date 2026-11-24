@@ -1,3 +1,25 @@
+## 0.5.4
+
+Turn-loop termination and reasoning-leak fixes, all live-observed.
+
+- **`maxTurns` accepts a getter.** The cap is re-read at every turn head, so a
+  lane can extend the loop when the user grants more work. A fixed number made
+  "Keep going?" a lie: counters reset, then the loop hit its cap two turns
+  later.
+- **`maxWastedTurns` (default 3).** Turns whose every call was cut off by the
+  output budget — or removed by the tool whitelist — used to `continue` before
+  the loop breaker, so nothing counted them and the model re-ran up to
+  `maxTurns` times with no progress.
+- **Whitelist-filtered turns no longer end the run.** They are reported via
+  `onFilteredCalls` and the loop continues instead of falling into the
+  final-answer path.
+- **`dispatchTurnCalls` indexes positionally.** A repeated call object used to
+  overwrite its own index in a `Map<object, index>`, leaving an earlier slot
+  null and reporting "error: dispatch failed" for a call that never ran.
+- **`normalizeThinkingBlocks` drops inline `[THINKING]` markers.** A marker the
+  model types mid-sentence is not a block delimiter; it used to leak into the
+  bubble as `…[Time: 12:04. [/THINKING] Node version: v26.13.1`.
+
 # Changelog
 
 All notable changes to `@orplex/sdk`. Versions follow semver; `0.x` minors may

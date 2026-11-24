@@ -47,6 +47,22 @@ export function normalizeThinkingBlocks(text: string): string {
   out = out.replace(/\s*\[THINKING\]\s*/g, `\n${THINK_OPEN}\n`);
   out = out.replace(/\s*\[\/THINKING\]\s*/g, `\n${THINK_CLOSE}\n\n`);
 
+  // 1b. Markers the MODEL typed inside its own reasoning, mid-sentence, are not
+  //     block delimiters — the renderer only splits on a marker alone on its
+  //     line, so an inline one survived as literal junk in the bubble:
+  //     "...[Time: 12:04. [/THINKING] Node version: v26.13.1" (live-seen).
+  //     Drop the marker text, keep the prose around it.
+  out = out
+    .split("\n")
+    .map((line) => {
+      const t = line.trim();
+      if (t === THINK_OPEN || t === THINK_CLOSE) return line; // real delimiter
+      return line
+        .replace(/\[\/?THINKING\]/g, "")
+        .replace(/<\|[^>]{1,60}\|>/g, "");
+    })
+    .join("\n");
+
   // 2. Detect leaked-but-unwrapped deliberation: a leading paragraph with
   //    deliberation cues, before any real answer formatting.
   const hasMarker = out.includes(THINK_OPEN);

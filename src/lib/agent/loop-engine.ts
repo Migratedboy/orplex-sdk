@@ -71,7 +71,21 @@ export interface TurnLoopExit {
 export type LoopAction = "break" | "continue" | null;
 
 export interface TurnLoopOptions {
-  maxTurns: number;
+  /**
+   * Turn cap. A plain number is fixed for the whole loop; a FUNCTION is
+   * re-read at the head of every iteration, so a lane can extend the loop when
+   * the user grants more turns ("Keep going?"). With a fixed number the grant
+   * was a lie: the counters reset, but the loop index kept walking into the
+   * same cliff two turns later.
+   */
+  maxTurns: number | (() => number);
+  /**
+   * How many consecutive turns may be wasted — every call cut off by the
+   * output budget, or removed by the tool whitelist — before the loop stops.
+   * Without this the truncated-only path re-ran the model up to maxTurns times
+   * while the loop breaker (which only ever sees real calls) never tripped.
+   */
+  maxWastedTurns?: number;
 
   /** Called at loop head each turn — status refresh, compaction, budget checks. */
   onTurnStart?: (turn: number) => void | Promise<void>;
@@ -245,20 +259,24 @@ export async function dispatchTurnCalls(
 ): Promise<{ results: string[]; outcomes: (DispatchedCall | null)[]; anyDup: boolean }> {
   const groups = planTurnDispatch(calls, limit);
   const outcomes: (DispatchedCall | null)[] = new Array(calls.length).fill(null);
-  // map call object → its index (duplicate call objects are still distinct entries)
-  const indexOf = new Map<Record<string, unknown>, number>();
-  calls.forEach((c, i) => indexOf.set(c, i));
+  // Indices are POSITIONAL, not identity-based: planTurnDispatch returns the
+  // same references in original order, so a running cursor is exact even when
+  // the SAME call object appears twice. The old Map<object, index> kept only
+  // the last slot of a repeated reference, leaving the earlier one null and
+  // reporting "error: dispatch failed" for a call that never ran.
+  let cursor = 0;
   let anyDup = false;
   for (const group of groups) {
     if (!group.parallel) {
-      const idx = indexOf.get(group.calls[0])!;
+      const idx = cursor++;
       outcomes[idx] = await dispatchCall(group.calls[0], idx);
       if (outcomes[idx]?.dedupRead) anyDup = true;
       continue;
     }
+    const groupIndexes = group.calls.map(() => cursor++);
     const settled = await Promise.all(
-      group.calls.map(async (call) => {
-        const idx = indexOf.get(call)!;
+      group.calls.map(async (call, i) => {
+        const idx = groupIndexes[i];
         try {
           return { idx, outcome: await dispatchCall(call, idx) };
         } catch (err) {
@@ -366,8 +384,11 @@ export function stripToolCallText(content: string): string {
  */
 export async function runTurnLoop(opts: TurnLoopOptions): Promise<TurnLoopExit> {
   const limit = Math.max(1, Math.floor(opts.parallelToolLimit ?? 1));
+  const turnCap = () => (typeof opts.maxTurns === "function" ? opts.maxTurns() : opts.maxTurns);
+  const wastedCap = Math.max(1, Math.floor(opts.maxWastedTurns ?? 3));
+  let wastedTurns = 0;
   let lastTurn = 0;
-  for (let turn = 0; turn < opts.maxTurns; turn++) {
+  for (let turn = 0; turn < turnCap(); turn++) {
     lastTurn = turn;
     if (opts.shouldAbort?.()) throw opts.throwAbort();
 
@@ -411,8 +432,33 @@ export async function runTurnLoop(opts: TurnLoopOptions): Promise<TurnLoopExit> 
       await opts.onTruncated?.(turn, parsed.truncated, out);
     }
     if (parsed.truncated.length > 0 && parsed.calls.length === 0) {
+      // Every call lost required args: nothing ran, and the loop breaker below
+      // never sees these (it tracks real calls). Cap the retries here or a
+      // model whose write_file keeps being cut off spins up to maxTurns.
+      wastedTurns++;
       await opts.onTruncatedOnly?.(turn, parsed.truncated, out);
-      continue;
+      if (wastedTurns < wastedCap) continue;
+      const truncatedStop = opts.onNoToolCalls ? await opts.onNoToolCalls(turn, out, textOnly) : null;
+      if (truncatedStop === "continue") {
+        wastedTurns = 0;
+        continue;
+      }
+      return { turn, ended: "no-calls", output: out };
+    }
+
+    // A turn whose every call was removed by the lane's whitelist is NOT a
+    // final answer: the model asked for a tool, was told it is unavailable,
+    // and must be allowed to answer or choose another tool. Falling through to
+    // onNoToolCalls ended the whole run right after that notice.
+    if (parsed.calls.length === 0 && parsed.filteredOut.length > 0) {
+      wastedTurns++;
+      if (wastedTurns < wastedCap) continue;
+      const filteredStop = opts.onNoToolCalls ? await opts.onNoToolCalls(turn, out, textOnly) : null;
+      if (filteredStop === "continue") {
+        wastedTurns = 0;
+        continue;
+      }
+      return { turn, ended: "no-calls", output: out };
     }
 
     // === NO VALID CALLS: final answer, or a lane nudge/retry ================
@@ -421,6 +467,8 @@ export async function runTurnLoop(opts: TurnLoopOptions): Promise<TurnLoopExit> 
       if (action === "continue") continue;
       return { turn, ended: "no-calls", output: out };
     }
+
+    wastedTurns = 0; // real calls dispatched — the wasted streak is broken
 
     // === LANE COUNTERS: before the tracker (worker parity) ===================
     if (opts.onTurnCalls) await opts.onTurnCalls(turn, out, parsed.calls);
