@@ -1,3 +1,10 @@
+## 0.5.5
+
+Message-content parsing: recognise the additional tool status prefixes
+(`[BLOCKED]`, `[TIMEOUT]`, `[EMPTY]`, `[UNAVAILABLE]`, `[WARN]`, `[ARGS]`)
+so errored tool calls are parsed as error segments instead of falling
+through as plain text and vanishing at the run-end hand-off.
+
 ## 0.5.4
 
 Turn-loop termination and reasoning-leak fixes, all live-observed.

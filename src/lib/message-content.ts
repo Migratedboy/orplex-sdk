@@ -406,7 +406,7 @@ export function parseContent(
   const pattern = new RegExp(
     `([<]tool_call[\\s\\S]*?[<]\\/tool_call[>]|<tool_result[^>]*>[\\s\\S]*?<\\/tool_result>|` +
       `${STATUS_LINE_RE.source}|` +
-      `^\\[OK\\]\\s+.+|^\\[FAIL\\]\\s+.+|^\\[SUCCESS\\]\\s+.+|^\\[ERROR\\]\\s+.+|^\\[ERR\\]\\s+.+|` +
+      `^\\[OK\\]\\s+.+|^\\[FAIL\\]\\s+.+|^\\[SUCCESS\\]\\s+.+|^\\[ERROR\\]\\s+.+|^\\[ERR\\]\\s+.+|^\\[BLOCKED\\]\\s+.+|^\\[TIMEOUT\\]\\s+.+|^\\[EMPTY\\]\\s+.+|^\\[UNAVAILABLE\\]\\s+.+|^\\[WARN\\]\\s+.+|^\\[ARGS\\]\\s+.+|` +
       `^\\[THINKING\\][\\s\\S]*?\\[\\/THINKING\\]|^\\[THINKING\\][\\s\\S]*$|` +
       `^\\[CLARIFIED\\]:[^\\n]+|` +
       `^\\[ARTIFACT\\]:[^\\n]+|` +
@@ -481,6 +481,8 @@ export function parseContent(
       segments.push({ type: "error", content: line, detail: line.replace(/^\[ERROR\]\s*/, "").trim() });
     } else if (/^\[ERR\]/.test(line)) {
       segments.push({ type: "error", content: line, detail: line.replace(/^\[ERR\]\s*/, "").trim() });
+    } else if (/^\[(BLOCKED|TIMEOUT|EMPTY|UNAVAILABLE|WARN|ARGS)\]/.test(line)) {
+      segments.push({ type: "error", content: line, detail: line.replace(/^\[[A-Z]+\]\s*/, "").trim() });
     } else if (line.startsWith("[CLARIFIED]:")) {
       // Answered clarification record — renders as the compact card. Raw JSON
       // only; anything malformed is dropped rather than shown to the user.
