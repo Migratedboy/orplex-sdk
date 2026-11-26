@@ -56,11 +56,39 @@ export const replaceTextSchema = z.object({
 export const insertAtSchema = z.object({
   op: z.literal("insert_at"),
   path: pathField,
-  /** 1-based line number; `lines + 1` appends at the end. */
-  line: z.number().int().min(1, "line is 1-based"),
+  /**
+   * 1-based line number; `lines + 1` appends at the end. LEGACY: line numbers
+   * drift after the model's own earlier edits, which is why `after`/`before`
+   * exist. Kept so old transcripts and prompts keep working.
+   */
+  line: z.number().int().min(1, "line is 1-based").optional(),
+  /**
+   * Text anchor: insert AFTER the single line containing this text. The anchor
+   * must match exactly one line — an ambiguous anchor is refused, never
+   * first-matched (the same rule that fixed replace_text).
+   */
+  after: z.string().min(1, "after must not be empty").optional(),
+  /** Text anchor: insert BEFORE the single line containing this text. */
+  before: z.string().min(1, "before must not be empty").optional(),
   content: z.string(),
   expectedHash: z.string().min(1).optional(),
 });
+/**
+ * Exactly one locator per insert: `line`, `after` or `before`. Enforced here
+ * rather than with a zod `.refine` because a ZodEffects member cannot sit in a
+ * discriminatedUnion (zod v3) — parseEditOp and the executor both check it.
+ */
+export function insertLocatorKeys(op: {
+  line?: number;
+  after?: string;
+  before?: string;
+}): Array<"line" | "after" | "before"> {
+  const keys: Array<"line" | "after" | "before"> = [];
+  if (op.line !== undefined) keys.push("line");
+  if (op.after !== undefined) keys.push("after");
+  if (op.before !== undefined) keys.push("before");
+  return keys;
+}
 
 export const deleteFileSchema = z.object({
   op: z.literal("delete_file"),
@@ -111,6 +139,28 @@ export type EditOp = z.infer<typeof editOpSchema>;
  */
 export function parseEditOp(raw: unknown): { ok: true; op: EditOp } | { ok: false; error: string } {
   const parsed = editOpSchema.safeParse(raw);
-  if (parsed.success) return { ok: true, op: parsed.data };
-  return { ok: false, error: formatZodError(parsed.error) };
+  if (!parsed.success) return { ok: false, error: formatZodError(parsed.error) };
+  const locatorError = checkInsertLocators(parsed.data);
+  if (locatorError) return { ok: false, error: locatorError };
+  return { ok: true, op: parsed.data };
+}
+
+/**
+ * Validate insert locators across a parsed op (and every op inside a batch).
+ * Returns a one-line error the caller can hand to the model, or null.
+ */
+export function checkInsertLocators(op: EditOp): string | null {
+  const ops = op.op === "batch" ? op.ops : [op];
+  for (const [i, candidate] of ops.entries()) {
+    if (candidate.op !== "insert_at") continue;
+    const keys = insertLocatorKeys(candidate);
+    const where = op.op === "batch" ? `ops[${i}].` : "";
+    if (keys.length === 0) {
+      return `${where}insert_at needs a locator: after (text of the preceding line), before (text of the following line) or line (1-based number).`;
+    }
+    if (keys.length > 1) {
+      return `${where}insert_at takes exactly one locator, got ${keys.join(" + ")}; drop all but one.`;
+    }
+  }
+  return null;
 }

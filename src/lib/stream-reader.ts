@@ -625,10 +625,18 @@ export async function readStream(
     model?: string;
     /** Legacy-lane MCP remotes to advertise to the server-side prompt builder. */
     mcpRemotes?: Array<{ id: string; label: string; url: string; auth: "oauth" | "bearer" | "none"; tools?: Array<{ name: string; description?: string; inputSchema?: unknown }> }>;
+    /**
+     * Skill chips attached in the composer. ID + NAME ONLY: the server resolves
+     * each id against its own catalogue and injects the real instruction text
+     * before the user's message. Sending the body from here would let any client
+     * dictate the injected prompt.
+     */
+    skills?: Array<{ id: string; name: string }>;
   } = {}
 ): Promise<StreamResult> {
   const model = opts.model;
   const mcpRemotes = opts.mcpRemotes;
+  const skills = opts.skills ?? [];
   const { onChunk, onThinking, onToolCall, onDone } = callbacks;
 
   const isAborted = () => signal?.aborted === true;
@@ -673,6 +681,9 @@ export async function readStream(
       effort: effort || undefined,
       profile: profile || undefined,
       model: model || undefined,
+      // Skill chips: refs only (see the ReadStreamOptions doc). Empty means the
+      // composer had no chips and the server injects nothing.
+      skills: skills.length > 0 ? skills : undefined,
       ...(typeof window !== "undefined" && typeof window.localStorage !== "undefined"
         ? { mcpRemotes: await resolveLegacyRemotes(mcpRemotes ?? [], mcpRoster) }
         : { mcpRoster }),

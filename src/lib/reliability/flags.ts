@@ -1,7 +1,20 @@
 /**
  * reliability/flags.ts — the single source of truth for every reliability
- * feature flag. Plan §15: every phase ships behind a flag that defaults OFF,
- * so the existing behaviour is byte-for-byte unchanged until a user opts in.
+ * feature flag.
+ *
+ * TWO CLASSES OF FLAG (B.L.A.S.T. audit, ARCHITECTURE.md §22):
+ *
+ *   ENFORCEMENT (default ON, opt out with `<VAR>=0`)
+ *     path jail, tool-argument schema validation (edit-ops surface), extended
+ *     loop guard (hard denylist + oscillation), durable failure memory.
+ *     These only refuse or constrain a call that was already unsafe; leaving
+ *     them off by default meant the whole reliability subsystem was dead code
+ *     in every stock install while evidence collection kept running. They are
+ *     armed now, and `RELIABILITY_GATES=0` disarms all of them at once.
+ *
+ *   EXPERIMENTS (default OFF, opt in with `<VAR>=1`)
+ *     test lane, baseline diff, roles review, flake control, acceptance spec,
+ *     verification report, provenance, injection scanning, capability policy.
  *
  * Pre-audit the repo read ~19 behavioural flags as scattered `process.env`
  * literals. This module centralises the RELIABILITY_* set so the defaults are
@@ -12,12 +25,70 @@
  * it would refuse writes while nothing can ever clear the lock.
  */
 
-/** Master switch. Every other flag is a no-op unless this is "1". */
+/**
+ * The declarative flag table — the thing docs, `npm run doctor` and the env
+ * checker read instead of re-listing env names. Keep the `envVar` in sync with
+ * the accessor below that reads it; the table exists so a typo'd name shows up
+ * once instead of in three places.
+ */
+export type ReliabilityFlagKind = "enforcement" | "experiment" | "master";
+
+export interface ReliabilityFlagDef {
+  envVar: string;
+  kind: ReliabilityFlagKind;
+  /** What turning it on does, in one line. */
+  summary: string;
+}
+
+export const RELIABILITY_FLAGS: readonly ReliabilityFlagDef[] = [
+  { envVar: "RELIABILITY_GATES", kind: "master", summary: "Master switch for the experiment flags; =0 is a kill switch for enforcement too." },
+  // Enforcement: armed unless =0.
+  { envVar: "RELIABILITY_PATH_JAIL", kind: "enforcement", summary: "Refuse writes that resolve outside the workspace (realpath jail + write denylist)." },
+  { envVar: "RELIABILITY_EDIT_OPS", kind: "enforcement", summary: "Validate tool arguments and enable the structured apply_edit_ops surface." },
+  { envVar: "RELIABILITY_LOOP_GUARD", kind: "enforcement", summary: "Extended loop guard: hard denylist, oscillation and no-progress detection, budgets." },
+  { envVar: "RELIABILITY_DURABLE_MEMORY", kind: "enforcement", summary: "Seed the failure doctrine, flake quarantine and compaction state from durable storage." },
+  // Experiments: opt in with =1 (and RELIABILITY_GATES=1 where noted).
+  { envVar: "RELIABILITY_EDIT_LOCK", kind: "experiment", summary: "Refuse further writes while a gate lane is red." },
+  { envVar: "RELIABILITY_TEST_LANE", kind: "experiment", summary: "Run the jest lane as a gate (the slowest tier)." },
+  { envVar: "RELIABILITY_BLOCK_BASELINE", kind: "experiment", summary: "Treat pre-existing baseline failures as blocking." },
+  { envVar: "RELIABILITY_ROLES_REVIEW", kind: "experiment", summary: "Roles stack + cross-family reviewer panel + risk-tiered review depth." },
+  { envVar: "RELIABILITY_REPORT", kind: "experiment", summary: "Compute and append the verification report at task close." },
+  { envVar: "RELIABILITY_TAMPER_DETECT", kind: "experiment", summary: "Flag deleted/skipped tests in the task diff." },
+  { envVar: "RELIABILITY_FLAKE_CONTROL", kind: "experiment", summary: "Rerun failed tests within budget and quarantine unstable ones." },
+  { envVar: "RELIABILITY_ACCEPTANCE", kind: "experiment", summary: "Derive an acceptance spec from the task text and track it." },
+  { envVar: "RELIABILITY_TAINT", kind: "experiment", summary: "Maintain provenance labels + the taint ledger." },
+  { envVar: "RELIABILITY_INJECTION_SCAN", kind: "experiment", summary: "Scan untrusted content entering model context for prompt injection." },
+  { envVar: "RELIABILITY_SCRUB", kind: "experiment", summary: "Redact secrets from tool output before it enters context." },
+  { envVar: "RELIABILITY_CAPABILITY_POLICY", kind: "experiment", summary: "Turn provenance/taint/egress detection into refusals and approval demands." },
+  { envVar: "RELIABILITY_PROTECTED_WRITE_OVERRIDE", kind: "experiment", summary: "Relax the elevated approval tier for protected test/CI paths." },
+] as const;
+
+/**
+ * Master switch for the EXPERIMENT flags. `"1"` opts in.
+ *
+ * Enforcement flags no longer consult it (see `enforcementEnabled`), except that
+ * `RELIABILITY_GATES=0` is an explicit kill switch for them too.
+ */
 export function reliabilityGatesEnabled(): boolean {
   try {
     return process.env.RELIABILITY_GATES === "1";
   } catch {
     return false;
+  }
+}
+
+/**
+ * Enforcement flags: ON unless explicitly disarmed.
+ *
+ * `RELIABILITY_GATES=0` wins over everything (the one-flag kill switch), then a
+ * per-flag `=0`. Any other value — including unset — means armed.
+ */
+function enforcementEnabled(varName: string): boolean {
+  try {
+    if (process.env.RELIABILITY_GATES === "0") return false;
+    return process.env[varName] !== "0";
+  } catch {
+    return true;
   }
 }
 
@@ -91,14 +162,14 @@ export function reliabilityRolesReviewEnabled(): boolean {
 /**
  * Phase 5 extended loop guard: oscillation (R3), no-progress (R5), token /
  * wall-clock budget (R6), hard (tool,args) denylist and the 5-rung
- * intervention ladder (loop-detect.ts). Off by default even under the master
- * switch: the classic four streak signals keep running either way, and this
- * set adds hard stops (denylist, rollback, ask-user) that a user should opt
- * into deliberately.
+ * intervention ladder (loop-detect.ts). ENFORCEMENT - armed by default: without
+ * the hard denylist the identical failing call was free to run again after the
+ * streak guard reset, which is the "amnesiac failure" loop the audit flagged.
+ * Disarm with RELIABILITY_LOOP_GUARD=0.
  */
 export function reliabilityLoopGuardExtendedEnabled(): boolean {
   try {
-    return reliabilityGatesEnabled() && process.env.RELIABILITY_LOOP_GUARD === "1";
+    return enforcementEnabled("RELIABILITY_LOOP_GUARD");
   } catch {
     return false;
   }
@@ -170,7 +241,7 @@ export function reliabilityAcceptanceSpecEnabled(): boolean {
  */
 export function reliabilityDurableMemoryEnabled(): boolean {
   try {
-    return reliabilityGatesEnabled() && process.env.RELIABILITY_DURABLE_MEMORY === "1";
+    return enforcementEnabled("RELIABILITY_DURABLE_MEMORY");
   } catch {
     return false;
   }
@@ -186,7 +257,7 @@ export function reliabilityDurableMemoryEnabled(): boolean {
  */
 export function reliabilityEditOpsEnabled(): boolean {
   try {
-    return reliabilityGatesEnabled() && process.env.RELIABILITY_EDIT_OPS === "1";
+    return enforcementEnabled("RELIABILITY_EDIT_OPS");
   } catch {
     return false;
   }
@@ -220,7 +291,7 @@ export function reliabilityVerificationReportEnabled(): boolean {
  */
 export function reliabilityPathJailEnabled(): boolean {
   try {
-    return reliabilityGatesEnabled() && process.env.RELIABILITY_PATH_JAIL === "1";
+    return enforcementEnabled("RELIABILITY_PATH_JAIL");
   } catch {
     return false;
   }

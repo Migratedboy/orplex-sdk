@@ -25,6 +25,21 @@ touched through dynamic `import()`.
 | `@orplex/sdk/cloud` | Split-deployment API client (base URL, credentials) |
 | `@orplex/sdk/marketplace` | Signed catalog fetch, verification, cache and resolution |
 | `@orplex/sdk/agent` | The agent loop (turn engine) over an injected model client |
+| `@orplex/sdk/lib/tool-registry` | The one tool-categorisation table: `READ_ONLY_TOOLS`, `WRITE_TOOLS`, `MUTATING_TOOL_NAMES`, `toolWritesWorkspace()`, `isMcpTool()` |
+
+### Reliability enforcement is on by default
+
+Path jail, tool-argument validation, the extended loop guard and durable failure
+memory are ENFORCEMENT flags: armed unless you disarm them (`RELIABILITY_PATH_JAIL=0`,
+`RELIABILITY_EDIT_OPS=0`, `RELIABILITY_LOOP_GUARD=0`, `RELIABILITY_DURABLE_MEMORY=0`,
+or the single kill switch `RELIABILITY_GATES=0`). Experiment flags — test lane,
+roles review, capability policy, provenance, injection scanning — remain opt-in
+with `=1`.
+
+Tool categories (`readOnly` / `writes` / `mutating`) live in one table,
+`lib/tool-registry.ts`, and every lane derives its sets from it — including the
+plan gate, which blocks MCP calls as well as workspace writes.
+
 
 ## Quickstart: dispatch a tool call
 

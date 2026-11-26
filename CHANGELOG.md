@@ -1,3 +1,54 @@
+## 0.5.7
+
+Reliability enforcement is now ARMED BY DEFAULT, and the tool categorisation
+that four subsystems each hand-maintained lives in one table.
+
+- **ENFORCEMENT FLAGS FAIL CLOSED.** Path jail, tool-argument schema
+  validation, the extended loop guard (hard denylist + oscillation + budgets)
+  and durable failure memory were all opt-in behind `RELIABILITY_GATES=1` plus a
+  per-phase variable, so every stock install collected evidence and enforced
+  nothing. They are now ON unless explicitly disarmed with `<VAR>=0`, and
+  `RELIABILITY_GATES=0` is a one-flag kill switch. Experiment flags (test lane,
+  roles review, capability policy, provenance, scanning) stay opt-in.
+- **`tool-registry.ts` — one categorisation table.** `READ_ONLY_TOOLS`,
+  `WRITE_TOOLS`, `MUTATING_TOOL_NAMES` and `STATE_CHANGING_TOOLS` are derived
+  from it, plus `toolWritesWorkspace()` / `isMcpTool()`. Six hand-written lists
+  had already drifted.
+- **Plan gate rebuilt on the registry.** `WRITE_TOOLS` here listed `move_file`
+  and `delete_file` (edit-ops payloads, not dispatchable tools) and omitted
+  `run_in_sandbox`, `extract_archive`, `apply_edit_ops` and every MCP tool — so
+  plan mode could execute code, unpack an archive, or call a third-party server
+  before the plan was approved. New `planBlockedTool(name)` answers from the
+  registry; MCP calls are gated, MCP metadata lookups are not.
+- **`extract_archive` is gated like a write.** It now goes through
+  `classifyRisk` → `requestApproval` (medium, high for a sensitive destination),
+  reports the files it wrote via `DispatchOutcome.writtenPaths`, and is included
+  in write accounting. Previously it wrote every archive entry with no approval
+  request and was invisible to self-review and FORCE-TOOLS.
+- **Path jail: Windows casing and a missing root no longer block real writes.**
+  `containPath` compared `realpath` output case-sensitively, so a workspace
+  whose on-disk casing differed from the configured path (drive letters,
+  `d:\` vs `D:\`) reported "resolves outside the workspace root" for paths
+  inside it. A workspace root that does not exist yet also hard-failed; lexical
+  containment is the boundary there. Both surfaced the moment enforcement
+  became the default.
+- **`risk-classifier`** learned `extract_archive` (medium; high into sensitive or
+  protected test paths).
+- **`insert_at` takes text anchors.** `after` / `before` insert relative to the
+  single line containing a snippet; the old 1-based `line` still works but is
+  documented as legacy. An anchor matching zero or more than one line is
+  REFUSED rather than first-matched — a line number is a claim about the whole
+  file that the model cannot keep true across its own earlier edits in the same
+  batch. Exactly one locator is required (`insert_locator` errors name the
+  offending `ops[i]`).
+- **`apply_edit_ops` validates every op in the array form.** The array used to
+  reach the executor as `never`, so a stringified line number or a missing
+  locator only failed later, mid-batch, with a vaguer message.
+- **`RELIABILITY_FLAGS` table**: every flag in one declarative list
+  (`envVar`, `kind: enforcement | experiment | master`, `summary`) for docs,
+  `npm run doctor` and env validation, so the env names cannot drift from the
+  accessors.
+
 ## 0.5.5
 
 Message-content parsing: recognise the additional tool status prefixes

@@ -167,6 +167,25 @@ export function classifyRisk(
     return { level: "medium", reason: "File write", autoApprovable: false };
   }
 
+  // 4b. Archive extraction — writes EVERY entry, so it is a write with an
+  //     unknown payload. It used to fall through to the default branch and be
+  //     dispatched with no approval request at all (B.L.A.S.T. §22, high).
+  if (toolName === "extract_archive") {
+    const dest = String(args.dest || "");
+    if (dest && (isSensitiveWritePath(dest, false) || isProtectedTestPath(dest))) {
+      return {
+        level: "high",
+        reason: `Archive extracts into a sensitive path (${dest})`,
+        autoApprovable: false,
+      };
+    }
+    return {
+      level: "medium",
+      reason: "Archive extraction writes every entry",
+      autoApprovable: false,
+    };
+  }
+
   // 5. Edits — target text matters more than path, but path still gates
   if (toolName === "edit_file" || toolName === "batch_edit") {
     const paths = args.edits

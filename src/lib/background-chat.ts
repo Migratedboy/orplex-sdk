@@ -48,6 +48,12 @@ export interface BackgroundTask {
    * model once — it needs to know WHICH model failed.
    */
   model?: string;
+  /**
+   * Skill chips attached to this turn ({ id, name } only). The save path
+   * re-stamps them into the persisted user text so a reloaded thread still
+   * shows the chips; the instruction body never travels with them.
+   */
+  skills?: { id: string; name: string }[];
 }
 
 export interface TaskStats {
@@ -376,7 +382,9 @@ export function startTask(
   initialMessages: ChatMessage[],
   mode: string = "code",
   /** Model id the task is sent to (prompt-bar pick) — feeds auto-retry. */
-  model?: string
+  model?: string,
+  /** Skill chips on this turn ({ id, name } only — never the instructions). */
+  skills?: { id: string; name: string }[]
 ): string {
   const id = `bg-${++taskIdCounter}`;
   generationCounter++;
@@ -400,6 +408,7 @@ export function startTask(
     clarificationCount: 0,
     mode,
     ...(model ? { model } : {}),
+    ...(skills && skills.length > 0 ? { skills } : {}),
     stats: { filesChanged: 0, commandsRun: 0, toolCalls: 0, rejectedActions: 0, failedSteps: 0 },
   };
   // New task — notify immediately and reset the coalescing state so stale

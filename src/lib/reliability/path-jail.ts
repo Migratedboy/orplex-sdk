@@ -104,6 +104,24 @@ export function isWriteDenied(absPath: string): { denied: boolean; reason?: stri
  * anywhere on disk (Windows junctions and repo symlinks are common, and
  * mkdir/writeFile both follow them).
  */
+/**
+ * Containment comparison for real (on-disk) paths.
+ *
+ * Windows and macOS compare paths case-insensitively, and `realpath` returns
+ * the ON-DISK casing — which can differ from the casing the app resolved (a
+ * user folder entered as `d:\orplex`, a drive letter from a shortcut). A strict
+ * `startsWith` therefore reported "resolves outside the workspace root" for
+ * paths that were plainly inside it. Arming the jail by default made that a
+ * hard blocker for real users, so the comparison normalises case where the
+ * platform does.
+ */
+function sameOrInside(child: string, parent: string): boolean {
+  const caseInsensitive = process.platform === "win32" || process.platform === "darwin";
+  const c = caseInsensitive ? child.toLowerCase() : child;
+  const p = caseInsensitive ? parent.toLowerCase() : parent;
+  return c === p || c.startsWith(p + sep);
+}
+
 export async function containPath(
   rootDir: string,
   targetPath: string,
@@ -143,7 +161,7 @@ export async function containPath(
           };
         }
         const real = await realpath(probe);
-        if (real !== realRoot && !real.startsWith(realRoot + sep)) {
+        if (!sameOrInside(real, realRoot)) {
           return { ok: false, reason: `"${targetPath}" resolves outside the workspace root` };
         }
         break;
@@ -155,7 +173,12 @@ export async function containPath(
       if (probe === rootAbs) {
         const rootStat = await lstat(rootAbs).catch(() => null);
         if (rootStat) break;
-        return { ok: false, reason: `"${targetPath}" could not be containment-checked: workspace root does not exist` };
+        // The workspace root itself does not exist (folder deleted, moved, or a
+        // lane that only knows the folder NAME). Lexical containment against
+        // rootAbs already passed above, and nothing under a missing directory
+        // can hide a link, so the write is allowed: refusing here meant every
+        // write failed with a containment message the user could not act on.
+        break;
       }
       const parent = dirname(probe);
       if (parent === probe) break; // reached the filesystem root

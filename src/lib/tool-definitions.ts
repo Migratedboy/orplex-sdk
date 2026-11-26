@@ -147,7 +147,7 @@ export const M3_TOOL_DEFINITIONS = [
     type: "function",
     function: {
       name: "apply_edit_ops",
-      description: "Apply a batch of structured edit ops to files ATOMICALLY: all-or-nothing with automatic rollback of already-applied ops if any op fails, plus stale-read detection via expectedHash and strict exact-one-match replacing. Prefer this over batch_edit when a partial application would be dangerous. Ops: batch(list of ops), create_file(path, content, expectedAbsence?), replace_text(path, oldText, newText, expectedHash?, occurrence: first|all|exactly_one — default exactly_one), insert_at(path, line (1-based), content, expectedHash?).",
+      description: "Apply a batch of structured edit ops to files ATOMICALLY: all-or-nothing with automatic rollback of already-applied ops if any op fails, plus stale-read detection via expectedHash and strict exact-one-match replacing. Prefer this over batch_edit when a partial application would be dangerous. Ops: batch(list of ops), create_file(path, content, expectedAbsence?), replace_text(path, oldText, newText, expectedHash?, occurrence: first|all|exactly_one — default exactly_one), insert_at(path, content, after|before|line, expectedHash?), delete_file(path, expectedHash?), move_file(from, to, expectedHash?). insert_at takes exactly one locator; PREFER after/before (a line of surrounding text, must match exactly one line) over line — line numbers drift after your own earlier edits and are refused rather than guessed.",
       parameters: {
         type: "object",
         properties: {
@@ -163,7 +163,9 @@ export const M3_TOOL_DEFINITIONS = [
                 content: { type: "string", description: "New content (create_file) or inserted text (insert_at)" },
                 oldText: { type: "string", description: "Exact text to replace" },
                 newText: { type: "string", description: "Replacement text" },
-                line: { type: "number", description: "1-based line number for insert_at" },
+                line: { type: "number", description: "LEGACY 1-based line number for insert_at; prefer after/before" },
+                after: { type: "string", description: "insert_at: insert below the single line containing this text" },
+                before: { type: "string", description: "insert_at: insert above the single line containing this text" },
                 ops: { type: "array", description: "Nested base ops for a batch (no further nesting)" },
                 expectedHash: { type: "string", description: "Hash of the content as last read — mismatches refuse the op (stale read)" },
                 expectedAbsence: { type: "boolean", description: "Set true to refuse create_file when the file already exists" },

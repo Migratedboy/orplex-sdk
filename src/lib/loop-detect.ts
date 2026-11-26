@@ -57,21 +57,10 @@ export const HARD_DENY_AFTER = 3;
 // reset). Everything else — writes, commands, browser interactions,
 // searches with side effects, scratchpad/todo spam — counts.
 // Exported: the single read-only set shared via agent/contract (no rival sets).
-export const READ_ONLY_TOOLS = new Set([
-  "read_file",
-  "list_files",
-  "search_code",
-  "code_search",
-  "web_search",
-  "browser_read",
-  "browser_find",
-  "browser_tabs",
-  "browser_network",
-  "browser_console",
-  "browser_wait_for",
-  "browser_screenshot",
-  "take_screenshot",
-]);
+import { READ_ONLY_TOOLS } from "./tool-registry";
+
+// Re-exported for agent/contract, which imports it from here.
+export { READ_ONLY_TOOLS };
 // spawn_subagent used to live in READ_ONLY_TOOLS, which exempted it from the
 // same-tool streak: a model changing only the task string each turn had NO
 // loop-detect signal at all (target null + no signal 4) while each spawn costs

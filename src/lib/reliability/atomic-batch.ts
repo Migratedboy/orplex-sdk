@@ -119,6 +119,83 @@ function replaceAll(content: string, needle: string, replacement: string): strin
   return out + content.slice(start);
 }
 
+/**
+ * Where an insert lands, as a 0-based line index (the splice point).
+ *
+ * Locators, in order of preference for the caller:
+ *  - `after`/`before`: text anchors. A line number is a claim about the whole
+ *    file that the model cannot keep true across its own earlier edits in the
+ *    same batch — an anchor is local to the code it just read.
+ *  - `line`: legacy 1-based number, `lines + 1` appends.
+ *
+ * An anchor that matches 0 or >1 lines is REFUSED, never first-matched: that
+ * is the same rule that fixed replace_text, and a wrong-line insert is worse
+ * than a refusal because it silently corrupts structure.
+ */
+function resolveInsertIndex(
+  op: { line?: number; after?: string; before?: string },
+  content: string,
+): { ok: true; index: number } | { ok: false; error: string } {
+  const locators = [op.line !== undefined, op.after !== undefined, op.before !== undefined].filter(
+    Boolean,
+  ).length;
+  if (locators === 0) {
+    return {
+      ok: false,
+      error:
+        "insert_at failed: needs a locator — after (text of the line to insert below), " +
+        "before (text of the line to insert above) or line (1-based number)",
+    };
+  }
+  if (locators > 1) {
+    return { ok: false, error: "insert_at failed: takes exactly one locator (line, after or before)" };
+  }
+
+  const lines = content === "" ? [] : content.split("\n");
+
+  if (op.after !== undefined || op.before !== undefined) {
+    const anchor = (op.after ?? op.before) as string;
+    const hits = lines.reduce<number[]>((acc, line, i) => {
+      if (line.includes(anchor)) acc.push(i);
+      return acc;
+    }, []);
+    if (hits.length === 0) {
+      return {
+        ok: false,
+        error: `insert_at failed: anchor not found in the file — ${JSON.stringify(anchor)} appears on no line; read the file again and copy the anchor verbatim`,
+      };
+    }
+    if (hits.length > 1) {
+      return {
+        ok: false,
+        error: `insert_at failed: anchor is ambiguous — ${JSON.stringify(anchor)} matches ${hits.length} lines (${hits
+          .slice(0, 5)
+          .map((i) => i + 1)
+          .join(", ")}${hits.length > 5 ? ", ..." : ""}); include more of the line so it matches exactly one`,
+      };
+    }
+    return { ok: true, index: op.after !== undefined ? hits[0] + 1 : hits[0] };
+  }
+
+  const line = op.line as number;
+  if (lines.length === 0) {
+    if (line !== 1) {
+      return {
+        ok: false,
+        error: `insert_at failed: line ${line} out of range (file is empty; valid line: 1)`,
+      };
+    }
+    return { ok: true, index: 0 };
+  }
+  if (line > lines.length + 1) {
+    return {
+      ok: false,
+      error: `insert_at failed: line ${line} out of range (file has ${lines.length} line(s); valid 1..${lines.length + 1})`,
+    };
+  }
+  return { ok: true, index: line - 1 };
+}
+
 async function applyOne(op: EditOpBase, io: EditIO): Promise<ApplyOutcome> {
   switch (op.op) {
     case "create_file": {
@@ -172,23 +249,11 @@ async function applyOne(op: EditOpBase, io: EditIO): Promise<ApplyOutcome> {
       const mismatch = hashMismatch(op.path, current, op.expectedHash);
       if (mismatch) return { ok: false, error: mismatch };
 
-      let next: string;
-      if (current === "") {
-        if (op.line !== 1) {
-          return { ok: false, error: `insert_at failed: line ${op.line} out of range (file is empty; valid line: 1)` };
-        }
-        next = op.content;
-      } else {
-        const lines = current.split("\n");
-        if (op.line > lines.length + 1) {
-          return {
-            ok: false,
-            error: `insert_at failed: line ${op.line} out of range (file has ${lines.length} line(s); valid 1..${lines.length + 1})`,
-          };
-        }
-        const inserted = op.content.split("\n");
-        next = [...lines.slice(0, op.line - 1), ...inserted, ...lines.slice(op.line - 1)].join("\n");
-      }
+      const target = resolveInsertIndex(op, current);
+      if (!target.ok) return { ok: false, error: target.error };
+      const lines = current === "" ? [] : current.split("\n");
+      const inserted = op.content.split("\n");
+      const next = [...lines.slice(0, target.index), ...inserted, ...lines.slice(target.index)].join("\n");
       const wrote = await io.writeFile(op.path, next);
       if (!wrote) return { ok: false, error: `insert_at failed: could not write ${op.path}` };
       return { ok: true, entry: { op, path: op.path, previousContent: current } };

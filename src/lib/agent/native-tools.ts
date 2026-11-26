@@ -141,6 +141,12 @@ export interface DispatchOutcome {
    *  the vision channel so the model SEES the capture, and they are already
    *  rendered inline in the chat transcript by the handler below. */
   imageDataUrl?: string;
+  /** Workspace-relative paths this call wrote outside the normal file tools
+   *  (archive extraction). The caller folds these into its write ledger so
+   *  self-review/FORCE-TOOLS see them. */
+  writtenPaths?: string[];
+  /** true when the user declined the approval request for this call */
+  rejected?: boolean;
 }
 
 
@@ -229,6 +235,42 @@ export async function dispatchToolCall(
   // attached .zip is the only way its contents become readable, so gating it
   // to full-tier providers would dead-end the feature on free tiers.
   if (call.name === "extract_archive" && call.path) {
+    // Approval + accounting. This tool writes every entry of the archive, yet
+    // it used to run before the first approval request and was invisible to
+    // the write ledger, self-review and FORCE-TOOLS checks (B.L.A.S.T. §22).
+    const extractRisk = classifyRisk("extract_archive", {
+      path: call.path,
+      dest: call.dest,
+    });
+    const destLabel = typeof call.dest === "string" && call.dest ? call.dest : "(workspace root)";
+    if (extractRisk.level === "high") {
+      emitActivity({
+        type: "tool",
+        message: `High-risk extraction requires approval: ${call.path.slice(0, 40)}`,
+        agent: "coder",
+      });
+    }
+    ctx.setStatus("awaiting_approval", `Waiting for approval: extract ${call.path}`);
+    ctx.appendDisplay(`extracting [${call.path}] → [${destLabel}] — awaiting approval\n`);
+    ctx.syncDisplay();
+    const extractApproved = await requestApproval(
+      "write_file",
+      `Extract archive: ${call.path} → ${destLabel}`,
+      { path: destLabel === "(workspace root)" ? "." : destLabel, archive: call.path },
+      undefined,
+      extractRisk.level,
+      ctx.abortSignal,
+    );
+    if (!extractApproved) {
+      ctx.stats.rejectedAction();
+      result(
+        `<tool_result name="extract_archive" path="${call.path}">rejected by user</tool_result>\n`,
+      );
+      ctx.replaceStatus(`[FAIL] Archive extraction rejected`);
+      ctx.syncDisplay();
+      return { resultXml: toolResults, blocked: false, rejected: true };
+    }
+
     ctx.setStatus("tool_executing", `Extracting ${call.path}…`);
     emitActivity({ type: "tool", message: `Extracting ${call.path}`, agent: "coder" });
     try {
@@ -250,6 +292,15 @@ export async function dispatchToolCall(
           : `[ERR] ${out.summary}\n`,
       );
       ctx.syncDisplay();
+      if (out.ok) {
+        // Written-file accounting: the dispatcher used to return nothing here,
+        // so extracted files never reached the caller's write ledger.
+        return {
+          resultXml: toolResults,
+          blocked: false,
+          writtenPaths: out.written.map((w) => w.path),
+        };
+      }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       result(`<tool_result name="extract_archive" path="${call.path}">\n[Error: ${msg}]\n</tool_result>\n`);
@@ -369,25 +420,27 @@ export async function dispatchToolCall(
     ctx.appendDisplay(`analysing [${call.path || "."}]\n`);
     ctx.syncDisplay();
 
-        let listing = listFilesUnderPath(call.path || "", ctx.fileTree);
-        // Disk fallback: an empty/stale tree must not be reported as an empty
-        // project. Only consulted when the snapshot yields nothing for the
-        // requested path, so the fast path (a warm tree) is unchanged.
-        const snapshotEmpty = listing.trim() === "No files found at that path.";
-        if (snapshotEmpty && ctx.listDir) {
+        // Disk is the source of truth: the in-memory `_fileTree` snapshot is
+        // stale after a reload/folder switch and has reported empty workspaces
+        // that actually contain files. Consult the disk route first whenever the
+        // host provides one, and only fall back to the snapshot when the disk is
+        // unavailable or returns nothing.
+        let listing = "No files found at that path.";
+        let diskEntries: string[] | null = null;
+        if (ctx.listDir) {
           try {
-            const entries = await ctx.listDir(call.path || "");
-            if (entries && entries.length > 0) {
-              // Directories first, then files — the same shape the tree walker
-              // produces, so downstream formatting does not change.
-              const dirs = entries.filter((e) => e.endsWith("/"));
-              const files = entries.filter((e) => !e.endsWith("/"));
-              listing = [...dirs, ...files].join("\n");
-              ctx.replaceStatus?.(`[SUCCESS] Listed ${entries.length} entr${entries.length === 1 ? "y" : "ies"} on disk in \`${call.path || "."}\``);
-            }
+            diskEntries = await ctx.listDir(call.path || "");
           } catch {
-            // A host without a disk route keeps the tree result — never throw.
+            diskEntries = null;
           }
+        }
+        if (diskEntries && diskEntries.length > 0) {
+          const dirs = diskEntries.filter((e) => e.endsWith("/"));
+          const files = diskEntries.filter((e) => !e.endsWith("/"));
+          listing = [...dirs, ...files].join("\n");
+          ctx.replaceStatus?.(`[SUCCESS] Listed ${diskEntries.length} entr${diskEntries.length === 1 ? "y" : "ies"} on disk in \`${call.path || "."}\``);
+        } else {
+          listing = listFilesUnderPath(call.path || "", ctx.fileTree);
         }
         // The empty sentinel is a single line, so splitting it yielded
         // fileCount === 1 and the status chip read
@@ -795,7 +848,23 @@ export async function dispatchToolCall(
     // The tool does not exist behind the flag — say so, plainly.
     let list: unknown[];
     if (Array.isArray(call.ops)) {
-      list = call.ops;
+      // Validate every op, not just the single-op form: the array used to reach
+      // applyEditOpsAtomic as `never`, so a stringified line number or a missing
+      // insert locator only failed later, mid-batch, with a vaguer message.
+      const validated: unknown[] = [];
+      for (const [i, raw] of call.ops.entries()) {
+        const parsed = parseEditOp(raw);
+        if (!parsed.ok) {
+          ctx.replaceStatus(`[ERROR] apply_edit_ops rejected — ops[${i}] ${parsed.error}`);
+          ctx.syncDisplay();
+          result(
+            `<tool_result name="${EDIT_OPS_TOOL_NAME}">refused: ops[${i}] ${parsed.error} — no ops were applied.</tool_result>\n`,
+          );
+          return { resultXml: toolResults, blocked: false };
+        }
+        validated.push(parsed.op);
+      }
+      list = validated;
     } else {
       const single = parseEditOp(call.ops);
       if (!single.ok) {
@@ -904,15 +973,11 @@ export async function dispatchToolCall(
     }
     if (results === null && searchUnavailableReason) {
       // Try the cache anyway — it may still hold the files.
-      const cached = searchCodeInContents(call.query, ctx.fileContents);
-      if (cached) {
-        results = cached;
-        engine = "cache";
-      } else {
-        // Neither lane could actually search. Say that instead of claiming
-        // the code is absent.
+      // Disk-only: never consult the in-memory read cache.
+      {
+        // Disk-only: report unavailable instead of scanning the read cache.
         const msg =
-          `SEARCH DID NOT RUN — ${searchUnavailableReason}, and the read cache had no files to scan. ` +
+          `SEARCH DID NOT RUN — ${searchUnavailableReason}. ` +
           `This is NOT evidence that "${call.query}" is absent from the workspace. ` +
           `Tell the user the search was unavailable rather than reporting no matches.`;
         result(`<tool_result name="search_code" query="${call.query}" engine="unavailable">\n${msg}\n</tool_result>\n`);
@@ -922,7 +987,8 @@ export async function dispatchToolCall(
       }
     }
     if (results === null) {
-      results = searchCodeInContents(call.query, ctx.fileContents);
+      // Disk-only: do not fall back to the in-memory read cache.
+      results = "";
     }
     const lineCount = results ? results.split("\n").length : 0;
     result(`<tool_result name="search_code" query="${call.query}" engine="${engine}">\n${results || `No matches for "${call.query}"`}\n</tool_result>\n`);
@@ -957,9 +1023,11 @@ export async function dispatchToolCall(
       }
     } catch {}
     if (results === null) {
-      results =
-        searchCodeInContents(call.query, ctx.fileContents) +
-        "\n[offline fallback — open the workspace folder for context-rich ripgrep snippets]";
+      const msg = `SEARCH DID NOT RUN — grep lane unavailable. This is NOT evidence that "${call.query}" is absent. Tell the user the search was unavailable.`;
+      result(`<tool_result name="code_search" query="${call.query}" engine="unavailable">\n${msg}\n</tool_result>\n`);
+      ctx.replaceStatus(`[UNAVAILABLE] code_search "${call.query}" could not run`);
+      ctx.syncDisplay();
+      return { resultXml: toolResults, blocked: false };
     }
     const matchCount = (results.match(/→ read_file/g) || []).length;
     result(`<tool_result name="code_search" query="${call.query}" engine="${engine}">\n${results}\n</tool_result>\n`);
